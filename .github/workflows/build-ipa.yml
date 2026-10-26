@@ -2,6 +2,7 @@
 # - push 마다: 아티팩트 kgeoScan-ipa
 # - 기본 브랜치 push: 롤링 프리릴리스 "latest" 의 kgeoScan.ipa 교체
 # - 태그 v*: 정식 릴리스
+# - 빌드 실패: 오류 줄을 annotation 과 프리릴리스 "ci-logs" 의 xcodebuild.log / errors.txt 로 공개 (로그인 없이 읽기 위해)
 # 설치는 INSTALL_WINDOWS.md (Sideloadly + 무료 Apple ID).
 name: Build unsigned IPA
 
@@ -68,6 +69,50 @@ jobs:
             CODE_SIGN_ENTITLEMENTS="" \
             DEVELOPMENT_TEAM="" \
             build 2>&1 | tee build/xcodebuild.log
+
+      - name: Collect errors (on failure)
+        if: failure()
+        run: |
+          grep -nE "error:|BUILD FAILED|fatal error:|Undefined symbol|ld: |xcodebuild: error" build/xcodebuild.log | head -300 > build/errors.txt || true
+          echo "=== errors.txt ==="
+          cat build/errors.txt
+          {
+            echo "## xcodebuild errors (run ${{ github.run_id }})"
+            echo '```'
+            head -150 build/errors.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 로그인 없이 API 로 볼 수 있도록 annotation 으로도 올린다 (step 당 10개 제한 → 4줄씩 묶음)
+          grep -E "error:" build/xcodebuild.log | grep -vE "^[[:space:]]*note:" | sort -u | head -40 > build/err_lines.txt || true
+          if [ -s build/err_lines.txt ]; then
+            split -l 4 build/err_lines.txt build/errchunk_
+            for f in build/errchunk_*; do
+              msg=$(cat "$f")
+              msg="${msg//'%'/'%25'}"
+              msg="${msg//$'\n'/'%0A'}"
+              msg="${msg//$'\r'/'%0D'}"
+              echo "::error title=xcodebuild::${msg:0:1500}"
+            done
+          else
+            tail -40 build/xcodebuild.log > build/tail.txt
+            msg=$(cat build/tail.txt)
+            msg="${msg//'%'/'%25'}"
+            msg="${msg//$'\n'/'%0A'}"
+            msg="${msg//$'\r'/'%0D'}"
+            echo "::error title=xcodebuild tail::${msg:0:1500}"
+          fi
+
+      - name: Publish log for anonymous download (on failure)
+        if: failure()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-logs
+          name: CI logs (last failed build)
+          prerelease: true
+          body: "마지막 실패 빌드의 xcodebuild 로그. run ${{ github.run_id }}, commit ${{ github.sha }}"
+          files: |
+            build/xcodebuild.log
+            build/errors.txt
 
       - name: Package IPA
         run: |
