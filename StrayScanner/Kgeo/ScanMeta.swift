@@ -55,6 +55,7 @@ struct UploadRecord: Codable, Hashable {
     var message: String?
     var sceneItemId: String?
     var glbUrl: String?
+    var thumbUrl: String?
     var resultUrl: String?
 }
 

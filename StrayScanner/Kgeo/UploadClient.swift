@@ -25,10 +25,11 @@ enum UploadError: LocalizedError {
     }
 }
 
-/// upload.py 응답: {"job_id": "...", "mode": "stray"} 또는 {"error": "..."}
+/// upload.py 응답: {"job_id": "...", "mode": "stray", "scan_type": "home"} 또는 {"error": "..."}
 struct UploadReply: Decodable {
     var jobId: String?
     var mode: String?
+    var scanType: String?
     var error: String?
 }
 
@@ -39,6 +40,10 @@ struct JobStatus: Decodable, Equatable {
     var step: Int?            // 0..7
     var stepName: String?
     var message: String?
+    var title: String?
+    var mode: String?
+    var scanType: String?     // home | survey
+    var thumbUrl: String?     // 처리 뒤 대표 이미지(JPEG) 주소
     var sceneItemId: String?
     var glbUrl: String?
     var updatedAt: String?

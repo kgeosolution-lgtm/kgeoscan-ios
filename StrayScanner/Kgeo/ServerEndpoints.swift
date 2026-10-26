@@ -45,12 +45,23 @@ struct ServerEndpoints {
         base.deletingLastPathComponent().appendingPathComponent("3dscan")
     }
 
-    func resultURL(sceneItemId: String?) -> URL {
+    /// 결과 페이지. scene_item_id 가 있으면 ?select=, 없으면 ?job= (사이트가 진행 상황·결과를 이어서 보여 준다)
+    func resultURL(sceneItemId: String?, jobId: String? = nil) -> URL {
         var components = URLComponents(url: viewerURL, resolvingAgainstBaseURL: false)!
         if !components.path.hasSuffix("/") { components.path += "/" }
         if let id = sceneItemId, !id.isEmpty {
             components.queryItems = [URLQueryItem(name: "select", value: id)]
+        } else if let job = jobId, !job.isEmpty {
+            components.queryItems = [URLQueryItem(name: "job", value: job)]
         }
+        return components.url!
+    }
+
+    /// 진행 상황 페이지: .../3dscan/?job=<job_id> — 7단계 진행을 보여 주고 끝나면 확대 버튼이 뜬다
+    func jobURL(jobId: String) -> URL {
+        var components = URLComponents(url: viewerURL, resolvingAgainstBaseURL: false)!
+        if !components.path.hasSuffix("/") { components.path += "/" }
+        components.queryItems = [URLQueryItem(name: "job", value: jobId)]
         return components.url!
     }
 }

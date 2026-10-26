@@ -48,7 +48,19 @@ final class UploadViewModel: ObservableObject {
     var resultURL: URL? {
         guard let endpoints = endpoints else { return nil }
         if let saved = meta.upload?.resultUrl, let url = URL(string: saved) { return url }
-        return endpoints.resultURL(sceneItemId: status?.sceneItemId ?? meta.upload?.sceneItemId)
+        return endpoints.resultURL(sceneItemId: status?.sceneItemId ?? meta.upload?.sceneItemId,
+                                   jobId: meta.upload?.jobId)
+    }
+
+    /// 사이트의 진행 상황 페이지 (?job=). 업로드가 끝나 job_id 가 있을 때만.
+    var jobURL: URL? {
+        guard let endpoints = endpoints, let jobId = meta.upload?.jobId else { return nil }
+        return endpoints.jobURL(jobId: jobId)
+    }
+
+    var thumbURL: URL? {
+        guard let thumb = status?.thumbUrl ?? meta.upload?.thumbUrl, !thumb.isEmpty else { return nil }
+        return URL(string: thumb, relativeTo: endpoints?.base)?.absoluteURL
     }
 
     func start(forceReupload: Bool = false) {
@@ -134,7 +146,7 @@ final class UploadViewModel: ObservableObject {
             body.addField("title", meta.title)
             body.addField("note", meta.note)
             body.addField("mode", "stray")
-            body.addField("scan_mode", meta.mode.rawValue)
+            body.addField("scan_type", meta.mode.rawValue)   // home | survey (서버 scan_points.scan_type)
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
             if let fix = meta.fix {
                 body.addField("lon", String(format: "%.8f", fix.lon))
@@ -195,9 +207,10 @@ final class UploadViewModel: ObservableObject {
                     meta.upload?.message = s.message
                     if let id = s.sceneItemId, !id.isEmpty { meta.upload?.sceneItemId = id }
                     if let glb = s.glbUrl, !glb.isEmpty { meta.upload?.glbUrl = glb }
+                    if let thumb = s.thumbUrl, !thumb.isEmpty { meta.upload?.thumbUrl = thumb }
                 }
                 if s.isDone {
-                    meta.upload?.resultUrl = endpoints.resultURL(sceneItemId: s.sceneItemId).absoluteString
+                    meta.upload?.resultUrl = endpoints.resultURL(sceneItemId: s.sceneItemId, jobId: jobId).absoluteString
                     try? meta.save(to: directory)
                     stage = .done
                     return
@@ -274,10 +287,27 @@ struct UploadView: View {
                 if let e = vm.errorMessage {
                     Text(e).foregroundColor(.red)
                 }
+                if vm.stage != .done, let job = vm.jobURL {
+                    Button {
+                        openURL(job)
+                    } label: {
+                        Label("웹에서 진행 보기", systemImage: "safari")
+                    }
+                }
             }
 
             Section {
                 if vm.stage == .done {
+                    if let thumb = vm.thumbURL {
+                        AsyncImage(url: thumb) { image in
+                            image.resizable().scaledToFit()
+                        } placeholder: {
+                            ProgressView()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 180)
+                        .cornerRadius(8)
+                    }
                     Button {
                         if let url = vm.resultURL { openURL(url) }
                     } label: {

@@ -96,11 +96,19 @@ struct SessionDetailView: View {
                         .padding(.horizontal, 16)
                     }
 
-                    if let result = meta?.upload?.resultUrl, let url = URL(string: result) {
-                        Button {
-                            openURL(url)
-                        } label: {
-                            Label("결과 보기 (웹)", systemImage: "safari")
+                    if let upload = meta?.upload {
+                        if upload.status == "done", let result = upload.resultUrl, let url = URL(string: result) {
+                            Button {
+                                openURL(url)
+                            } label: {
+                                Label("결과 보기 (웹)", systemImage: "safari")
+                            }
+                        } else if let endpoints = ServerEndpoints(string: upload.server) {
+                            Button {
+                                openURL(endpoints.jobURL(jobId: upload.jobId))
+                            } label: {
+                                Label("진행 보기 (웹)", systemImage: "safari")
+                            }
                         }
                     }
 

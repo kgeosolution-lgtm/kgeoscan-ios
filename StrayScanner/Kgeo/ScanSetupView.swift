@@ -31,7 +31,7 @@ struct ScanSetupView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                Text("모드는 지금은 라벨로만 저장됩니다 (meta.json, 업로드 필드 scan_mode).")
+                Text("모드는 meta.json 과 업로드 필드 scan_type(home/survey) 으로 서버에 전달됩니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -32,9 +32,10 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 
 | 요청 | 내용 |
 |---|---|
-| `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip). 추가로 `scan_mode=home|survey`, `app` 를 보내지만 서버는 무시한다. 응답 `{"job_id": "..."}` 또는 `{"error": "..."}` |
-| `GET {서버}/status.py?job_id=` | `{status, step 0..7, step_name, message, scene_item_id, glb_url}` — `done`/`failed` 가 될 때까지 3초마다 조회 |
-| 결과 페이지 | `{서버}` 의 `3dupload` 를 `3dscan` 으로 바꾼 주소 + `?select=<scene_item_id>` |
+| `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `scan_type=home|survey`(모드), `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip). `app` 도 보내지만 서버는 무시한다. 응답 `{"job_id": "...", "mode": "stray", "scan_type": "home"}` 또는 `{"error": "..."}` |
+| `GET {서버}/status.py?job_id=` | `{status, step 0..7, step_name, message, title, mode, scan_type, thumb_url, scene_item_id, glb_url}` — `done`/`failed` 가 될 때까지 3초마다 조회 |
+| 진행 페이지 | `{서버}` 의 `3dupload` 를 `3dscan` 으로 바꾼 주소 + `?job=<job_id>` — 사이트가 7단계 진행과 결과를 이어서 보여 준다 ("웹에서 진행 보기" 버튼) |
+| 결과 페이지 | 같은 주소 + `?select=<scene_item_id>` (없으면 `?job=`) |
 
 `{서버}` 기본값은 `https://kgeodata.com/app/3dupload`, 설정 화면에서 바꿀 수 있다 (UserDefaults 에 저장).
 zip 은 압축하지 않고 담기만 한다(mp4·png 는 이미 압축됨). 폴더 이름이 zip 의 최상위에 들어가며 서버는 `odometry.csv` 가 있는 폴더를 찾는다.
@@ -55,7 +56,7 @@ zip 은 압축하지 않고 담기만 한다(mp4·png 는 이미 압축됨). 폴
            "heading_accuracy": 15.0, "heading_time": "2026-10-27T09:12:33Z" },
   "upload": { "server": "https://kgeodata.com/app/3dupload", "job_id": "c23b2c73", "uploaded_at": "...",
               "status": "done", "step": 7, "step_name": "완료", "message": "", "scene_item_id": "...", "glb_url": "...",
-              "result_url": "https://kgeodata.com/app/3dscan/?select=..." }
+              "thumb_url": "...", "result_url": "https://kgeodata.com/app/3dscan/?select=..." }
 }
 ```
 
