@@ -37,6 +37,10 @@ class DatasetEncoder {
     public let odometryPath: URL
     public let imuPath: URL
     public var status = Status.allGood
+    /// kgeoScan: 녹화 폴더 (문서 폴더 기준 상대 URL)
+    public var directory: URL { datasetDirectory }
+    /// kgeoScan: 저장된 프레임 수
+    public var savedFrameCount: Int { savedFrames }
     private let queue: DispatchQueue
     
     private var latestAccelerometerData: (timestamp: Double, data: simd_double3)?

@@ -66,3 +66,19 @@ The `imu.csv` file contains timestamps, linear acceleration readings and angular
 | alpha\_y | Rotation in rad/s around the y-axis |
 | alpha\_z | Rotation in rad/s around the z-axis |
 
+
+## kgeoScan addition: `meta.json`
+
+kgeoScan (a fork of Stray Scanner) writes one extra file, `meta.json`, into the dataset folder. Everything above is unchanged.
+Keys are snake_case, dates are ISO 8601 (UTC). `fix` is the GPS/compass snapshot taken on the first frame after the record
+button was pressed (ARKit tracking is reset at that moment, so the world origin is that point and -z is the camera's forward
+direction); `upload` is filled in after the dataset was sent to the server. See the README for a full example.
+
+| Key | Meaning |
+|---|---|
+| `title`, `note`, `mode` | user input; `mode` is `home` or `survey` (label only for now) |
+| `server_base` | upload backend the scan was (or will be) sent to |
+| `created_at`, `duration_seconds`, `fps_divider`, `saved_frames` | recording facts |
+| `fix.lat`, `fix.lon`, `fix.alt`, `fix.h_acc`, `fix.v_acc` | CLLocation at record start (WGS84, metres) |
+| `fix.true_heading`, `fix.magnetic_heading`, `fix.heading_accuracy` | CLHeading at record start, degrees clockwise from north |
+| `upload.job_id`, `upload.status`, `upload.step`, `upload.scene_item_id`, `upload.result_url` | server job bookkeeping |

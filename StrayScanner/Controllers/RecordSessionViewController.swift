@@ -5,6 +5,13 @@
 //  Created by Kenneth Blomqvist on 11/28/20.
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
+//  kgeoScan 변경:
+//  - 녹화 시작 시 ARKit 트래킹을 리셋해 월드 원점을 녹화 시작 지점으로 맞춘다
+//    (서버는 원점을 lon/lat/elev 에 놓고, -z(정면)를 heading 방위로 돌린다).
+//  - 트래킹이 normal 이 된 첫 프레임에서 GPS·나침반 스냅샷을 찍는다.
+//  - 녹화가 끝나면 meta.json 을 쓰고 onFinished(녹화 폴더) 를 부른다.
+//  - 화면 위에 GPS/방위 상태를 보여 준다.
+//
 
 import Foundation
 import UIKit
@@ -46,23 +53,38 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     @IBOutlet private var timeLabel: UILabel!
     @IBOutlet weak var fpsButton: UIButton!
     var dismissFunction: Optional<() -> Void> = Optional.none
-    
+
+    // MARK: kgeoScan
+    /// 설정 화면에서 넘어온 제목·모드·서버 주소. 녹화가 끝나면 meta.json 으로 저장된다.
+    var scanMeta: ScanMeta?
+    /// 녹화가 정상적으로 끝났을 때 (녹화 폴더 절대 경로) 로 불린다. 없으면 dismissFunction 을 쓴다.
+    var onFinished: ((URL) -> Void)?
+    private var awaitingTracking = false
+    private var trackingWaitStarted: Date?
+    private let trackingWaitTimeout: TimeInterval = 3.0
+    private var geoFix: GeoFix?
+    private let geoLabel = UILabel()
+    private var geoLabelTimer: Timer?
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
+
     override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
         self.chosenFpsSetting = UserDefaults.standard.integer(forKey: FpsUserDefaultsKey)
         updateFpsSetting()
     }
 
     override func viewDidLoad() {
+        super.viewDidLoad()
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
         self.dataContext = appDelegate.persistentContainer.newBackgroundContext()
         self.renderer = CameraRenderer(rgbLayer: rgbView.layer, depthLayer: depthView.layer)
 
         depthView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
         rgbView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
-        
+
         setViewProperties()
         session.delegate = self
 
@@ -71,21 +93,33 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         fpsButton.layer.masksToBounds = true
         fpsButton.layer.cornerRadius = 12.0
-        
+
         imuOperationQueue.qualityOfService = .userInitiated
+
+        setupGeoLabel()
+        LocationService.shared.start()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
-        session.pause();
+        super.viewDidDisappear(animated)
+        session.pause()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
         updateLabelTimer?.invalidate()
+        geoLabelTimer?.invalidate()
+        geoLabelTimer = nil
         datasetEncoder = nil
     }
 
     override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
         startSession()
+        geoLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.updateGeoLabel()
+        }
+        updateGeoLabel()
     }
 
     private func startSession() {
@@ -99,7 +133,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             session.run(config)
         }
     }
-    
+
     private func startRawIMU() {
         if self.motionManager.isAccelerometerAvailable {
             self.motionManager.accelerometerUpdateInterval = 1.0 / 1200.0 // Set update rate
@@ -142,7 +176,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             print("Stopped gyroscope updates.")
         }
     }
-    
+
     private func toggleRecording(_ recording: Bool) {
         if unsupported {
             showUnsupportedAlert()
@@ -158,12 +192,25 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func startRecording() {
+        guard let config = arConfiguration else { return }
+        // 월드 원점을 녹화 시작 지점으로 맞춘다. 첫 프레임은 트래킹이 normal 로 돌아온 뒤 저장한다.
+        session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        awaitingTracking = true
+        trackingWaitStarted = Date()
+        geoFix = nil
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             self.updateTime()
         }
-        datasetEncoder = DatasetEncoder(arConfiguration: arConfiguration!, fpsDivider: FpsDividers[chosenFpsSetting])
+        datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting])
+    }
+
+    /// 트래킹이 잡힌 첫 프레임: 이 순간의 GPS·방위가 스캔의 원점·기준 방위가 된다.
+    private func beginCapture() {
+        awaitingTracking = false
+        geoFix = LocationService.shared.snapshot()
+        startedRecording = Date()
         startRawIMU()
     }
 
@@ -173,38 +220,50 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             return
         }
         startedRecording = nil
+        awaitingTracking = false
         updateLabelTimer?.invalidate()
         updateLabelTimer = nil
         // Stop IMU updates
         stopRawIMU()
-        datasetEncoder?.wrapUp()
-        if let encoder = datasetEncoder {
-            switch encoder.status {
-                case .allGood:
-                    saveRecording(started, encoder)
-                case .videoEncodingError:
-                    showError()
-                case .directoryCreationError:
-                    showError()
-            }
-        } else {
+        guard let encoder = datasetEncoder else {
             print("No dataset encoder. Something is wrong.")
+            self.dismissFunction?()
+            return
         }
-        self.dismissFunction?()
+        encoder.wrapUp()
+        let directory = encoder.directory.absoluteURL.standardizedFileURL
+        if encoder.savedFrameCount == 0 {
+            try? FileManager.default.removeItem(at: directory)
+            datasetEncoder = nil
+            showError(message: "녹화된 프레임이 없습니다. 트래킹이 잡힌 뒤 조금 더 길게 녹화해 주세요.", popOnDismiss: false)
+            return
+        }
+        switch encoder.status {
+            case .allGood:
+                saveRecording(started, encoder)
+                writeMeta(started: started, encoder: encoder, directory: directory)
+                if let onFinished = onFinished {
+                    onFinished(directory)
+                } else {
+                    self.dismissFunction?()
+                }
+            case .videoEncodingError, .directoryCreationError:
+                showError(message: "영상 인코딩 중 오류가 났습니다. 다시 녹화해 주세요.")
+        }
     }
 
     private func saveRecording(_ started: Date, _ encoder: DatasetEncoder) {
         let sessionCount = countSessions()
-        
+
         let duration = Date().timeIntervalSince(started)
         let entity = NSEntityDescription.entity(forEntityName: "Recording", in: self.dataContext)!
         let recording: Recording = Recording(entity: entity, insertInto: self.dataContext)
-        recording.setValue(datasetEncoder!.id, forKey: "id")
+        recording.setValue(encoder.id, forKey: "id")
         recording.setValue(duration, forKey: "duration")
         recording.setValue(started, forKey: "createdAt")
-        recording.setValue("Recording \(sessionCount)", forKey: "name")
-        recording.setValue(datasetEncoder!.rgbFilePath.relativeString, forKey: "rgbFilePath")
-        recording.setValue(datasetEncoder!.depthFilePath.relativeString, forKey: "depthFilePath")
+        recording.setValue(scanMeta?.title ?? "Recording \(sessionCount)", forKey: "name")
+        recording.setValue(encoder.rgbFilePath.relativeString, forKey: "rgbFilePath")
+        recording.setValue(encoder.depthFilePath.relativeString, forKey: "depthFilePath")
         do {
             try self.dataContext.save()
         } catch let error as NSError {
@@ -212,12 +271,28 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
     }
 
-    private func showError() {
-        let controller = UIAlertController(title: "Error",
-            message: "Something went wrong when encoding video. This should not have happened. You might want to file a bug report.",
-            preferredStyle: .alert)
-        controller.addAction(UIAlertAction(title: NSLocalizedString("OK", comment: "Default Action"), style: .default, handler: { _ in
-            self.dismiss(animated: true, completion: nil)
+    private func writeMeta(started: Date, encoder: DatasetEncoder, directory: URL) {
+        var meta = scanMeta ?? ScanMeta(title: "Recording", note: "", mode: .home, serverBase: KgeoDefaults.storedServerBase)
+        meta.createdAt = started
+        meta.durationSeconds = Date().timeIntervalSince(started)
+        meta.fpsDivider = FpsDividers[chosenFpsSetting]
+        meta.savedFrames = encoder.savedFrameCount
+        meta.device = ScanMeta.deviceModel()
+        meta.systemVersion = UIDevice.current.systemVersion
+        meta.fix = geoFix
+        do {
+            try meta.save(to: directory)
+        } catch {
+            print("meta.json 저장 실패: \(error.localizedDescription)")
+        }
+    }
+
+    private func showError(message: String, popOnDismiss: Bool = true) {
+        let controller = UIAlertController(title: "오류", message: message, preferredStyle: .alert)
+        controller.addAction(UIAlertAction(title: "확인", style: .default, handler: { _ in
+            if popOnDismiss {
+                self.dismissFunction?()
+            }
         }))
         self.present(controller, animated: true, completion: nil)
     }
@@ -243,7 +318,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 rgbView.isHidden = true
         }
     }
-    
+
     @IBAction func fpsButtonTapped() {
         chosenFpsSetting = (chosenFpsSetting + 1) % AvailableFpsSettings.count
         updateFpsSetting()
@@ -252,33 +327,60 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         self.renderer!.render(frame: frame)
-        if startedRecording != nil {
-            if let encoder = datasetEncoder {
-                encoder.add(frame: frame)
-            } else {
-                print("There is no video encoder. That can't be good.")
+        guard startedRecording != nil, let encoder = datasetEncoder else { return }
+        if awaitingTracking {
+            var ready = false
+            if case .normal = frame.camera.trackingState {
+                ready = true
+            } else if let t0 = trackingWaitStarted, Date().timeIntervalSince(t0) > trackingWaitTimeout {
+                ready = true
             }
+            guard ready else { return }
+            beginCapture()
         }
+        encoder.add(frame: frame)
     }
 
     private func setViewProperties() {
         self.view.backgroundColor = UIColor(named: "BackgroundColor")
     }
-    
+
+    private func setupGeoLabel() {
+        geoLabel.translatesAutoresizingMaskIntoConstraints = false
+        geoLabel.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        geoLabel.textColor = .white
+        geoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        geoLabel.layer.cornerRadius = 8
+        geoLabel.layer.masksToBounds = true
+        geoLabel.textAlignment = .center
+        geoLabel.numberOfLines = 1
+        geoLabel.text = "  위치 확인 중…  "
+        view.addSubview(geoLabel)
+        NSLayoutConstraint.activate([
+            geoLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            geoLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            geoLabel.heightAnchor.constraint(equalToConstant: 26),
+        ])
+    }
+
+    private func updateGeoLabel() {
+        geoLabel.text = "  " + LocationService.shared.shortStatus + "  "
+    }
+
     private func updateFpsSetting() {
         let fps = AvailableFpsSettings[chosenFpsSetting]
         let buttonLabel: String = "\(fps) fps"
         fpsButton.setTitle(buttonLabel, for: UIControl.State.normal)
     }
-    
+
     private func showUnsupportedAlert() {
-        let alert = UIAlertController(title: "Unsupported device", message: "This device doesn't seem to have the required level of ARKit support.", preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default, handler: { _ in
+        let alert = UIAlertController(title: "지원하지 않는 기기", message: "이 기기는 LiDAR(sceneDepth) 가 있는 ARKit 을 지원하지 않습니다. iPhone 12 Pro 이후의 Pro 모델이 필요합니다.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "확인", style: .default, handler: { _ in
             self.dismissFunction?()
         }))
         self.present(alert, animated: true)
     }
-    
+
     private func countSessions() -> Int {
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return 0 }
         let request = NSFetchRequest<NSManagedObject>(entityName: "Recording")

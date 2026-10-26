@@ -5,11 +5,13 @@
 //  Created by Kenneth Blomqvist on 11/15/20.
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
+//  kgeoScan 변경: @main, 백그라운드 URLSession(업로드) 이벤트 전달.
+//
 
 import UIKit
 import CoreData
 
-@UIApplicationMain
+@main
 class AppDelegate: UIResponder, UIApplicationDelegate {
     public var appDaemon: AppDaemon? = Optional.none
 
@@ -17,6 +19,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // Override point for customization after application launch.
         appDaemon = AppDaemon(appDelegate: self)
         return true
+    }
+
+    /// 앱이 꺼진 사이 백그라운드 업로드가 끝나면 iOS 가 앱을 깨우고 이 메서드를 부른다.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String, completionHandler: @escaping () -> Void) {
+        guard identifier == UploadClient.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        UploadClient.shared.backgroundCompletionHandler = completionHandler
+        UploadClient.shared.reconnect()
     }
 
     // MARK: UISceneSession Lifecycle
@@ -47,7 +59,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             if let error = error as NSError? {
                 // Replace this implementation with code to handle the error appropriately.
                 // fatalError() causes the application to generate a crash log and terminate. You should not use this function in a shipping application, although it may be useful during development.
-                 
+
                 /*
                  Typical reasons for an error here include:
                  * The parent directory does not exist, cannot be created, or disallows writing.
@@ -79,4 +91,3 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
 }
-

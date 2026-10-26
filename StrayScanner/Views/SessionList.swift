@@ -5,9 +5,18 @@
 //  Created by Kenneth Blomqvist on 11/15/20.
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
+//  kgeoScan 변경: NavigationStack 으로 '새 스캔 → 설정 → 녹화 → 업로드' 흐름을 잇는다.
+//
 
 import SwiftUI
 import CoreData
+
+/// 새 스캔 흐름의 화면들
+enum ScanRoute: Hashable {
+    case setup
+    case record(ScanMeta)
+    case upload(URL)
+}
 
 class SessionListViewModel: ObservableObject {
     private var dataContext: NSManagedObjectContext?
@@ -32,7 +41,6 @@ class SessionListViewModel: ObservableObject {
             sessions = fetched.map { session in
                 return session as! Recording
             }
-
         } catch let error as NSError {
             print("Something went wrong. Error: \(error), \(error.userInfo)")
         }
@@ -41,25 +49,21 @@ class SessionListViewModel: ObservableObject {
     @objc func sessionsChanged() {
         fetchSessions()
     }
-
 }
 
 struct SessionList: View {
     @ObservedObject var viewModel = SessionListViewModel()
     @State private var showingInfo = false
+    @State private var path: [ScanRoute] = []
 
     var body: some View {
-        ZStack {
-        Color.black
-        .ignoresSafeArea()
-        NavigationView {
+        NavigationStack(path: $path) {
             VStack(alignment: .leading) {
                 HStack {
-                    Text("Recordings")
+                    Text("kgeoScan")
                         .foregroundColor(Color("TextColor"))
                         .font(.largeTitle)
                         .fontWeight(.bold)
-                        .multilineTextAlignment(.center)
                         .padding([.top, .leading], 15.0)
                     Spacer()
                     Button(action: {
@@ -78,25 +82,29 @@ struct SessionList: View {
 
                 if !viewModel.sessions.isEmpty {
                     List {
-                        ForEach(Array(viewModel.sessions.enumerated()), id: \.element) { i, recording in
+                        ForEach(viewModel.sessions, id: \.objectID) { recording in
                             NavigationLink(destination: SessionDetailView(recording: recording)) {
                                 SessionRow(session: recording)
                             }
                         }
                     }
                     .scrollContentBackground(.hidden)
-                    Spacer()
                 } else {
                     Spacer()
-                    Text("No recorded sessions. Record one, and it will appear here.")
+                    Text("아직 스캔이 없습니다.\n'새 스캔'을 눌러 녹화하면 여기에 나타납니다.")
                         .font(.body)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 50.0)
+                        .padding(.horizontal, 40.0)
+                        .frame(maxWidth: .infinity)
+                    Spacer()
                 }
+
                 HStack {
                     Spacer()
-                    NavigationLink(destination: NewSessionView(), label: {
-                        Text("Record new session")
+                    Button(action: {
+                        path.append(.setup)
+                    }, label: {
+                        Label("새 스캔", systemImage: "plus.viewfinder")
                             .font(.title3)
                             .padding(20)
                             .background(Color("TextColor"))
@@ -106,31 +114,32 @@ struct SessionList: View {
                     })
                     Spacer()
                 }
-                if (viewModel.sessions.isEmpty) {
-                    Spacer()
-                }
             }
             .navigationBarHidden(true)
             .background(Color("BackgroundColor").ignoresSafeArea())
+            .navigationDestination(for: ScanRoute.self) { route in
+                switch route {
+                case .setup:
+                    ScanSetupView { meta in
+                        path.append(.record(meta))
+                    }
+                case .record(let meta):
+                    RecordScreen(meta: meta) { directory in
+                        // 녹화 화면을 빼고 업로드 화면으로 바꿔 끼운다
+                        path = [.upload(directory)]
+                    }
+                case .upload(let directory):
+                    UploadView(directory: directory)
+                }
+            }
             .onAppear {
                 DispatchQueue.main.async {
                     viewModel.fetchSessions()
                 }
-                FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).forEach({ url in
-                    let relative = url.relativeString
-                    print("relative url: \(relative)")
-                })
                 let delegate = UIApplication.shared.delegate as! AppDelegate
                 delegate.appDaemon?.removeDeletedEntries()
-        }
+            }
         }
         .background(Color("BackgroundColor").edgesIgnoringSafeArea(.all))
-        }
-    }
-}
-
-struct SessionList_Previews: PreviewProvider {
-    static var previews: some View {
-        SessionList()
     }
 }

@@ -1,0 +1,74 @@
+# kgeoScan — XcodeGen 프로젝트 정의.
+# `xcodegen generate` 가 kgeoScan.xcodeproj 를 만든다 (CI 가 자동으로 하므로 .xcodeproj 는 커밋하지 않는다).
+name: kgeoScan
+options:
+  bundleIdPrefix: com.kgeosolution
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: false
+  groupSortPosition: top
+
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: 0.9.19
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CLANG_CXX_LANGUAGE_STANDARD: "gnu++14"
+    CLANG_CXX_LIBRARY: "libc++"
+    ALWAYS_SEARCH_USER_PATHS: NO
+    ENABLE_BITCODE: NO
+
+targets:
+  kgeoScan:
+    type: application
+    platform: iOS
+    sources:
+      - path: StrayScanner
+        name: kgeoScan
+        excludes:
+          - "Info.plist"
+    dependencies:
+      - package: ZIPFoundation
+    settings:
+      base:
+        PRODUCT_NAME: kgeoScan
+        PRODUCT_BUNDLE_IDENTIFIER: com.kgeosolution.kgeoscan
+        INFOPLIST_FILE: StrayScanner/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: StrayScanner/BridgeHeader.h
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/StrayScanner/Shaders"
+          - "$(SRCROOT)/StrayScanner/CCode"
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        DEVELOPMENT_ASSET_PATHS: "\"StrayScanner/Preview Content\""
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+        MTL_FAST_MATH: YES
+      configs:
+        Debug:
+          MTL_ENABLE_DEBUG_INFO: INCLUDE_SOURCE
+        Release:
+          MTL_ENABLE_DEBUG_INFO: NO
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+
+schemes:
+  kgeoScan:
+    build:
+      targets:
+        kgeoScan: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
