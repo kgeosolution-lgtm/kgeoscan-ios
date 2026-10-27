@@ -55,14 +55,14 @@ enum UploadError: LocalizedError {
 
 /// 전송 방식
 enum UploadTransport: String {
-    case http1 = "http1"           // HTTP/1.1 직접 연결 (기본)
-    case system = "system"         // URLSession (서버가 HTTP/2 면 HTTP/2)
+    case system = "system"         // URLSession (기본, 서버가 HTTP/2 면 HTTP/2)
+    case http1 = "http1"           // HTTP/1.1 직접 연결 (예비: 서버의 HTTP/2 문제가 재발할 때)
     case background = "background" // 백그라운드 URLSession (실험)
 
     var label: String {
         switch self {
-        case .http1: return "HTTP/1.1 직접 연결"
-        case .system: return "시스템 URLSession"
+        case .system: return "시스템 URLSession (기본)"
+        case .http1: return "HTTP/1.1 직접 연결 (예비)"
         case .background: return "백그라운드 (실험)"
         }
     }

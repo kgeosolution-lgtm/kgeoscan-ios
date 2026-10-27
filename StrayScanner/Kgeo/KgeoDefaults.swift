@@ -19,7 +19,7 @@ enum KgeoDefaults {
     static let modeKey = "kgeo.mode"
     /// true 면 백그라운드 URLSession 으로 전송 (실험). 기본 false = 앱을 열어 둔 채 전송
     static let backgroundUploadKey = "kgeo.backgroundUpload"
-    /// 전송 방식: http1 (기본, HTTP/1.1 직접 연결) | system (URLSession, HTTP/2 가능) | background (실험)
+    /// 전송 방식: system (기본, URLSession·HTTP/2) | http1 (HTTP/1.1 직접 연결, 예비) | background (실험)
     static let uploadTransportKey = "kgeo.uploadTransport"
     /// true 면 Wi-Fi 에서만 업로드 (셀룰러 차단, 기본 false)
     static let wifiOnlyKey = "kgeo.wifiOnly"
@@ -27,10 +27,11 @@ enum KgeoDefaults {
     static let meshColorKey = "kgeo.meshColor"
     static let meshOpacityKey = "kgeo.meshOpacity"
 
-    /// 저장된 전송 방식 (예전 '백그라운드' 토글과 호환)
+    /// 저장된 전송 방식 (예전 '백그라운드' 토글과 호환). 기본은 시스템 URLSession —
+    /// 2026-10-27 서버(IIS CGI 의 stderr 경고가 응답 헤더에 섞여 HTTP/2 스트림이 끊기던 문제)가 고쳐져 h2 로도 정상 응답한다.
     static var uploadTransport: String {
         if let raw = UserDefaults.standard.string(forKey: uploadTransportKey), !raw.isEmpty { return raw }
-        return UserDefaults.standard.bool(forKey: backgroundUploadKey) ? "background" : "http1"
+        return UserDefaults.standard.bool(forKey: backgroundUploadKey) ? "background" : "system"
     }
     /// 녹화가 끝나면 바로 업로드 화면으로 (기본 true)
     static let autoUploadKey = "kgeo.autoUpload"

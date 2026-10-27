@@ -160,7 +160,7 @@ final class UploadViewModel: ObservableObject {
             fail("서버 주소가 올바르지 않습니다: \(meta.serverBase)")
             return
         }
-        let transportMode = UploadTransport(rawValue: KgeoDefaults.uploadTransport) ?? .http1
+        let transportMode = UploadTransport(rawValue: KgeoDefaults.uploadTransport) ?? .system
         let isBackground = transportMode == .background
         let wifiOnly = UserDefaults.standard.bool(forKey: KgeoDefaults.wifiOnlyKey)
         transport = transportMode.label + (wifiOnly ? " (Wi-Fi 전용)" : "")

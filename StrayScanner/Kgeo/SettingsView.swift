@@ -12,7 +12,7 @@ struct SettingsView: View {
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
     @AppStorage(KgeoDefaults.autoUploadKey) private var autoUpload: Bool = true
     @AppStorage(KgeoDefaults.wifiOnlyKey) private var wifiOnly: Bool = false
-    @AppStorage(KgeoDefaults.uploadTransportKey) private var transportRaw: String = UploadTransport.http1.rawValue
+    @AppStorage(KgeoDefaults.uploadTransportKey) private var transportRaw: String = UploadTransport.system.rawValue
     @AppStorage(KgeoDefaults.meshColorKey) private var meshColor: String = "red"
     @AppStorage(KgeoDefaults.meshOpacityKey) private var meshOpacity: Double = 0.5
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
@@ -63,11 +63,11 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Picker("전송 방식", selection: $transportRaw) {
-                    Text(UploadTransport.http1.label).tag(UploadTransport.http1.rawValue)
                     Text(UploadTransport.system.label).tag(UploadTransport.system.rawValue)
+                    Text(UploadTransport.http1.label).tag(UploadTransport.http1.rawValue)
                     Text(UploadTransport.background.label).tag(UploadTransport.background.rawValue)
                 }
-                Text("HTTP/1.1 직접 연결(기본)은 서버가 HTTP/2 를 고르지 못하게 하는 방식입니다. 2026-10-27 실기기에서 시스템 URLSession(HTTP/2)은 서버가 다 받고 응답해도 '연결이 끊어졌습니다'가 났습니다. 어느 방식이든 끊기면 서버에 작업이 생겼는지(client_id) 확인한 뒤에만 최대 3회 다시 보냅니다. 백그라운드는 화면을 꺼도 이어지지만 응답을 못 받으면 처음부터 다시 보내려 하므로 앱이 전송을 끊고 알립니다.")
+                Text("기본은 iOS 의 URLSession 입니다(프록시·IPv6·인증서 처리를 시스템이 맡음). 서버의 HTTP/2 응답 문제는 2026-10-27 에 서버 쪽에서 고쳐졌고, 재발하면 'HTTP/1.1 직접 연결'로 바꿀 수 있습니다. 어느 방식이든 끊기면 서버에 작업이 생겼는지(client_id) 최대 60초 확인한 뒤에만 다시 보냅니다. 백그라운드는 화면을 꺼도 이어지지만 응답을 못 받으면 처음부터 다시 보내려 하므로 앱이 전송을 끊고 알립니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

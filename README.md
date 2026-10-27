@@ -54,11 +54,12 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 `{서버}` 기본값은 `https://kgeodata.com/app/3dupload`, 설정 화면에서 바꿀 수 있다 (UserDefaults 에 저장).
 zip 은 압축하지 않고 담기만 한다(mp4·png 는 이미 압축됨). 폴더 이름이 zip 의 최상위에 들어가며 서버는 `odometry.csv` 가 있는 폴더를 찾는다.
 
-**전송 방식** (설정 → 업로드): 기본은 **HTTP/1.1 직접 연결** ([Http1Uploader.swift](StrayScanner/Kgeo/Http1Uploader.swift), Network.framework,
-TLS 옵션에 ALPN 을 넣지 않아 서버가 HTTP/2 를 고르지 못한다). 서버 kgeodata.com 은 ALPN 으로 h2 를 협상하는데, 2026-10-27 실기기에서
-`URLSession`(HTTP/2)으로는 서버가 본문을 다 받고 응답까지 보낸 뒤에도 클라이언트에 "네트워크 연결이 끊어졌습니다"(-1005)가 났고,
-PC 의 HTTP/1.1 클라이언트는 항상 성공했다. 대안으로 "시스템 URLSession" 과 "백그라운드 (실험)" 을 고를 수 있다 (백그라운드는
-응답을 못 받으면 본문을 처음부터 다시 보내려 하므로 앱이 전송을 끊고 알린다).
+**전송 방식** (설정 → 업로드): 기본은 iOS 의 **`URLSession`** (서버가 HTTP/2 를 협상하면 HTTP/2). 2026-10-27 실기기에서
+서버가 본문을 다 받고도 클라이언트에 "네트워크 연결이 끊어졌습니다"(-1005)가 나던 문제는 서버 쪽 원인이었다
+(IIS CGI 가 Python 3.14 의 SyntaxWarning 을 응답 헤더에 섞어 HTTP/2 스트림만 RST). 서버에서 고쳐졌으므로 기본은 URLSession 으로
+두고, 같은 증상이 재발하면 **HTTP/1.1 직접 연결** ([Http1Uploader.swift](StrayScanner/Kgeo/Http1Uploader.swift), Network.framework, TLS 에
+ALPN 을 넣지 않아 서버가 HTTP/2 를 고르지 못함)로 바꿀 수 있다. "백그라운드 (실험)" 은 화면을 꺼도 이어지지만 응답을 못 받으면
+본문을 처음부터 다시 보내려 하므로 앱이 전송을 끊고 알린다.
 
 **끊김 복구**: 연결 오류(-1005, 타임아웃, 502/503/504 등)가 나면 바로 다시 올리지 않고 `GET {서버}/find_job.py?client_id=` 를
 3초 간격으로 최대 60초 물어 이 녹화의 작업이 만들어졌는지 확인한다 (IIS 는 HTTP/2 에서 본문을 다 받고 작업을 만든 뒤 응답 없이
