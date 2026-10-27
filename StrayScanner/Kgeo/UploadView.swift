@@ -38,6 +38,8 @@ final class UploadViewModel: ObservableObject {
     /// 보낸 바이트가 줄어든(처음부터 다시 보낸) 횟수
     @Published var restarts: Int = 0
     @Published var transport: String = ""
+    /// 진행 섹션에 보여 줄 한 줄 상태 (서버 접수 확인 중 등)
+    @Published var statusNote: String?
 
     let directory: URL
     private var runTask: Task<Void, Never>?
@@ -190,6 +192,18 @@ final class UploadViewModel: ObservableObject {
                 return
             }
         }
+        // 서버가 400 을 낼 조건은 미리 거른다 (HTTP/2 경로에서는 400 응답조차 못 받는다)
+        guard !meta.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            stage = .idle
+            fail("제목이 비어 있습니다. 스캔 상세에서 제목을 확인해 주세요.")
+            return
+        }
+        if let fix = meta.fix, !(fix.lat.isFinite && fix.lon.isFinite && abs(fix.lat) <= 90 && abs(fix.lon) <= 180) {
+            stage = .idle
+            fail(String(format: "위치 좌표가 올바르지 않습니다 (%.5f, %.5f)", fix.lat, fix.lon))
+            return
+        }
+        appendLog("사전 검사 통과: 제목·위치·모드(\(meta.mode.rawValue))")
 
         var zipURL: URL?
         var bodyURL: URL?
@@ -295,9 +309,12 @@ final class UploadViewModel: ObservableObject {
                         throw error
                     }
                     guard UploadError.isRetryable(error) else { throw error }
-                    appendLog("연결 오류: \(error.localizedDescription) — 서버에 이 녹화(client_id)로 만든 작업이 있는지 확인합니다", persist: true)
-                    if let clientId = meta.clientId, let found = await UploadClient.findJob(endpoints: endpoints, clientId: clientId) {
-                        appendLog("서버에 작업 \(found.jobId) 가 이미 있습니다 — 다시 올리지 않고 상태 조회로 넘어갑니다", persist: true)
+                    let h2Hint = (transportMode != .http1 && (error as? URLError)?.code == .networkConnectionLost)
+                        ? "서버 응답이 HTTP/2 에서 끊김 → " : ""
+                    appendLog("\(h2Hint)연결 오류: \(error.localizedDescription) — 서버 접수 여부를 확인합니다 (find_job, 3초 간격 최대 60초)", persist: true)
+                    if let clientId = meta.clientId, let found = await waitForServerJob(endpoints: endpoints, clientId: clientId) {
+                        statusNote = nil
+                        appendLog("서버가 접수했습니다: 작업 \(found.jobId) (\(found.status ?? "pending")) — 다시 올리지 않고 상태 조회로 넘어갑니다", persist: true)
                         attempt.finishedAt = Date()
                         attempt.jobId = found.jobId
                         attempt.duplicate = true
@@ -311,17 +328,19 @@ final class UploadViewModel: ObservableObject {
                         await poll(endpoints: endpoints, jobId: found.jobId)
                         return
                     }
+                    statusNote = nil
                     guard sendAttempt < maxAttempts else {
-                        appendLog("서버에 작업이 없고 재시도 \(maxAttempts)회를 모두 썼습니다", persist: true)
+                        appendLog("60초 동안 서버에 작업이 없었고 재시도 \(maxAttempts)회를 모두 썼습니다", persist: true)
                         throw error
                     }
-                    let delay = [5, 15, 45][min(sendAttempt - 1, 2)]
+                    let delay = [3, 10, 30][min(sendAttempt - 1, 2)]
                     appendLog("서버에 작업이 없습니다. \(delay)초 뒤 같은 client_id 로 다시 보냅니다 (\(sendAttempt + 1)/\(maxAttempts))", persist: true)
                     try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
                     meta.attemptCount = (meta.attemptCount ?? 0) + 1
                     attempt.startedAt = Date()
                 }
             }
+            statusNote = nil
             let bodyText = String(data: data.prefix(300), encoding: .utf8) ?? "(UTF-8 아님, \(data.count) 바이트)"
             appendLog("응답: HTTP \(code) \(bodyText)")
             attempt.finishedAt = Date()
@@ -367,6 +386,26 @@ final class UploadViewModel: ObservableObject {
                 fail(error.localizedDescription)
             }
         }
+    }
+
+    /// 전송이 끊긴 뒤 서버가 이 client_id 의 작업을 만들었는지 3초 간격으로 최대 60초 확인한다
+    @MainActor
+    private func waitForServerJob(endpoints: ServerEndpoints, clientId: String) async -> (jobId: String, status: String?)? {
+        let started = Date()
+        var tries = 0
+        while Date().timeIntervalSince(started) < 60, !Task.isCancelled {
+            tries += 1
+            let elapsed = Int(Date().timeIntervalSince(started))
+            statusNote = "서버 접수 확인 중 (\(elapsed)/60초)…"
+            if let found = await UploadClient.findJob(endpoints: endpoints, clientId: clientId) {
+                return found
+            }
+            if tries % 5 == 0 {
+                appendLog("아직 서버에 작업이 없습니다 (\(elapsed)초)")
+            }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+        return nil
     }
 
     @MainActor
@@ -470,6 +509,12 @@ struct UploadView: View {
                     Text(statusLine(s))
                         .font(.caption)
                         .foregroundColor(.secondary)
+                }
+                if let note = vm.statusNote {
+                    HStack {
+                        ProgressView().controlSize(.small)
+                        Text(note).font(.caption).foregroundColor(.secondary)
+                    }
                 }
                 if let e = vm.pollError {
                     Text("상태 조회 오류: \(e)")
