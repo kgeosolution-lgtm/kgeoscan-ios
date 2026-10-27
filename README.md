@@ -30,6 +30,12 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   0.3 m 미만·3 m 초과·너무 빠른 움직임 1 m/s·60°/s)와 모드별 힌트(현장조사: 물체를 중앙에 두고 천천히 한 바퀴 / 홈스캔: 벽·바닥 훑기).
 - **노출 옵션** ([ExposureController.swift](StrayScanner/Kgeo/ExposureController.swift)): 설정 화면 '빠른 셔터 1/250' 을 고르면 iOS 16 의
   `configurableCaptureDeviceForPrimaryCamera` 로 셔터를 고정하고 ISO 로 밝기를 맞춰 모션블러를 줄인다 (사진 기반 복원용 키프레임 품질).
+- **위치 입력**: 새 스캔 화면에서 '현재 위치(GPS)' 또는 '지도에서 선택'([MapPickerView.swift](StrayScanner/Kgeo/MapPickerView.swift), 탭으로 핀, 드래그,
+  현재 위치로 옮기기, 방위 직접 입력). GPS 는 정확도(±m)와 '다시 잡기'. 선택한 위치는 `meta.json` 의 `manual_fix`/`fix` 에 저장되고 `lon`/`lat`/`heading` 으로 전송된다.
+- **촬영 통계와 요약**: 녹화 중 거리·속도·깊이 신뢰도·선명도를 모아 `capture_stats` 로 저장하고, 기준에 못 미치면 종료 때 "촬영 품질 확인" 창에서
+  '다시 찍기(삭제)' 를 제안한다. 기준은 2026-10-27 컵 녹화 분석(0.21 m 근접, 1.66 m/s, 흐림)에서 잡았다: 현장조사 0.4~1.5 m·0.5 m/s, 홈스캔 0.3~3 m·0.7 m/s.
+- **목록·설정**: 썸네일(녹화 중 가장 선명한 프레임 `thumb.jpg`), 용량, 배지(미업로드/업로드 중/처리 중/완료/실패), 스와이프 삭제.
+  설정(톱니): 서버 주소, 기본 스캔 유형·위치 입력, 녹화 뒤 자동 업로드, Wi-Fi 에서만 업로드, 백그라운드 전송(실험), 노출.
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,
   **-z = 그 순간 카메라 정면**이 되게 한다. 트래킹이 `normal` 로 돌아온 첫 프레임에서 GPS(lat/lon/alt)와 나침반 방위를 찍어
   `lon`/`lat`/`elev`/`heading` 으로 보낸다. 서버는 원점을 (lon, lat, elev) 에 놓고 -z 를 heading 방위로 돌린다
