@@ -14,6 +14,7 @@ struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
     @AppStorage(KgeoDefaults.locationSourceKey) private var locationSourceRaw: String = "gps"
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
+    @AppStorage(KgeoDefaults.objectModeKey) private var objectMode: Bool = true
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
@@ -41,6 +42,12 @@ struct ScanSetupView: View {
                      : "홈스캔: 벽과 바닥을 0.3~3 m 거리에서 천천히 훑습니다. 방 단위로 나눠 찍는 것이 좋습니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                if modeRaw == ScanMode.survey.rawValue {
+                    Toggle("물체 모드 (소형 물체 360° 촬영)", isOn: $objectMode)
+                    Text("녹화 화면에서 물체를 탭하면 자를 영역(반투명 구)이 표시되고, 둘레를 얼마나 돌았는지 링 게이지로 보여 줍니다. 서버는 그 영역만 잘라 복원합니다.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section("위치 · 방위") {
@@ -187,6 +194,7 @@ struct ScanSetupView: View {
                             mode: ScanMode(rawValue: modeRaw) ?? .home,
                             serverBase: endpoints.normalized)
         meta.locationSource = locationSourceRaw
+        meta.objectMode = (meta.mode == .survey) && objectMode
         if locationSourceRaw == "map" {
             guard let c = pickedCoordinate else {
                 validationMessage = "지도에서 스캔 위치를 찍어 주세요."

@@ -7,9 +7,12 @@
 //
 //  kgeoScan 변경:
 //  - 화면: Stray 의 Metal 깊이/RGB 뷰 대신 ARSCNView 가 실제 카메라 화면을 그리고, 그 위에 ARKit
-//    sceneReconstruction 메시(ARMeshAnchor)를 반투명 면으로 덮어 "어디를 찍었는지" 보여 준다 (탭하면 끄고 켬).
+//    sceneReconstruction 메시(ARMeshAnchor)를 반투명 면으로 덮어 "어디를 찍었는지" 보여 준다 (버튼/탭으로 끄고 켬).
 //  - 녹화 시작 시 ARKit 트래킹을 리셋해 월드 원점을 녹화 시작 지점으로 맞춘다
 //    (서버는 원점을 lon/lat/elev 에 놓고, -z(정면)를 heading 방위로 돌린다). 메시도 이때 비워진다.
+//  - 물체 모드: 탭(레이캐스트, 실패 시 깊이맵)으로 물체 중심을 잡아 반투명 구로 자를 영역을 보여 주고, 카메라 방위각
+//    36칸 커버리지 링과 고도 3단, 거리·회전 속도 안내를 낸다. 녹화 전에 물체를 지정하면 그 순간 트래킹을 리셋해
+//    월드 원점을 고정하고(물체 좌표 = odometry.csv 좌표계), 녹화 시작 때는 다시 리셋하지 않는다.
 //  - 트래킹이 normal 이 된 첫 프레임에서 GPS·나침반 스냅샷(또는 지도에서 찍은 위치 + 나침반)을 기록한다.
 //  - 촬영 안내: 트래킹 상태, LiDAR 거리, 깊이 신뢰도, 움직임 속도, 흐림 경고, 모드별 힌트, 프레임 수·예상 용량.
 //  - 녹화 중 가장 선명한 프레임을 thumb.jpg 로 저장, 종료 뒤 촬영 통계 요약과 '다시 찍기' 제안.
@@ -26,6 +29,7 @@ import CoreData
 import CoreMotion
 import CoreImage
 import ImageIO
+import simd
 
 let FpsDividers: [Int] = [1, 2, 4, 12, 60]
 let AvailableFpsSettings: [Int] = FpsDividers.map { Int(60 / $0) }
@@ -61,7 +65,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     var dismissFunction: Optional<() -> Void> = Optional.none
 
     // MARK: kgeoScan
-    /// 설정 화면에서 넘어온 제목·모드·서버 주소·위치 입력 방식. 녹화가 끝나면 meta.json 으로 저장된다.
+    /// 설정 화면에서 넘어온 제목·모드·서버 주소·위치 입력 방식·물체 모드. 녹화가 끝나면 meta.json 으로 저장된다.
     var scanMeta: ScanMeta?
     /// 녹화가 정상적으로 끝났을 때 (녹화 폴더 절대 경로) 로 불린다. 없으면 dismissFunction 을 쓴다.
     var onFinished: ((URL) -> Void)?
@@ -88,6 +92,22 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var lastThumbCheck: TimeInterval = 0
     private var thumbWritten = false
 
+    // 물체 모드
+    private var objectMode = false
+    private let objectTracker = ObjectTracker()
+    private var objectNode: SCNNode?
+    private let reticle = ReticleView(frame: CGRect(x: 0, y: 0, width: 44, height: 44))
+    private let objectButton = UIButton(type: .system)
+    private let radiusSlider = UISlider()
+    private let ringView = CoverageRingView(frame: .zero)
+    private let haptic = UINotificationFeedbackGenerator()
+    /// 물체 지정 때 트래킹을 리셋해 월드 원점을 이미 고정했는지 (녹화 시작 때 다시 리셋하지 않는다)
+    private var worldFrameFixed = false
+    private var awaitingFrameFix = false
+    private var frameFixStarted: Date?
+    private var pendingDesignationPoint: CGPoint?
+    private var fixedGeoFix: GeoFix?
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -103,9 +123,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
         self.dataContext = appDelegate.persistentContainer.newBackgroundContext()
 
-        guide.thresholds = (scanMeta?.mode ?? .home) == .survey ? CaptureGuide.survey : CaptureGuide.home
+        objectMode = scanMeta?.objectMode ?? false
+        if objectMode {
+            guide.thresholds = CaptureGuide.object
+        } else {
+            guide.thresholds = (scanMeta?.mode ?? .home) == .survey ? CaptureGuide.survey : CaptureGuide.home
+        }
         setupSceneView()
         setupOverlayViews()
+        if objectMode {
+            setupObjectViews()
+        }
         setViewProperties()
         session.delegate = self
 
@@ -164,7 +192,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         sceneView.antialiasingMode = .none
         sceneView.preferredFramesPerSecond = 30
         sceneView.backgroundColor = .black
-        sceneView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
+        sceneView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped(_:))))
     }
 
     private func setupOverlayViews() {
@@ -187,13 +215,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guideLabel.numberOfLines = 2
         guideLabel.isHidden = true
 
-        overlayButton.translatesAutoresizingMaskIntoConstraints = false
-        overlayButton.setTitle("메시 켜짐", for: .normal)
-        overlayButton.titleLabel?.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
-        overlayButton.setTitleColor(.white, for: .normal)
-        overlayButton.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        overlayButton.layer.cornerRadius = 8
-        overlayButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+        styleButton(overlayButton, title: "메시 켜짐")
         overlayButton.addTarget(self, action: #selector(overlayButtonTapped), for: .touchUpInside)
         view.addSubview(overlayButton)
 
@@ -213,6 +235,65 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             statsLabel.bottomAnchor.constraint(equalTo: guideLabel.topAnchor, constant: -8),
         ])
         geoLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    private func styleButton(_ button: UIButton, title: String) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        button.setTitleColor(.white, for: .normal)
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        button.layer.cornerRadius = 8
+        button.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+    }
+
+    /// 물체 모드 UI: 조준점, 물체 지정 버튼, 반경 슬라이더, 커버리지 링
+    private func setupObjectViews() {
+        reticle.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(reticle)
+
+        styleButton(objectButton, title: "물체 지정")
+        objectButton.addTarget(self, action: #selector(objectButtonTapped), for: .touchUpInside)
+
+        radiusSlider.translatesAutoresizingMaskIntoConstraints = false
+        radiusSlider.minimumValue = ObjectTracker.minRadius
+        radiusSlider.maximumValue = ObjectTracker.maxRadius
+        radiusSlider.value = objectTracker.radius
+        radiusSlider.isHidden = true
+        radiusSlider.addTarget(self, action: #selector(radiusChanged), for: .valueChanged)
+
+        let row = UIStackView(arrangedSubviews: [objectButton, radiusSlider])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.axis = .horizontal
+        row.spacing = 8
+        row.alignment = .center
+        view.addSubview(row)
+
+        ringView.translatesAutoresizingMaskIntoConstraints = false
+        ringView.isHidden = true
+        view.addSubview(ringView)
+
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            reticle.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
+            reticle.centerYAnchor.constraint(equalTo: depthView.centerYAnchor),
+            reticle.widthAnchor.constraint(equalToConstant: 44),
+            reticle.heightAnchor.constraint(equalToConstant: 44),
+            row.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: statsLabel.topAnchor, constant: -8),
+            radiusSlider.widthAnchor.constraint(equalToConstant: 140),
+            ringView.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            ringView.bottomAnchor.constraint(equalTo: overlayButton.topAnchor, constant: -8),
+            ringView.widthAnchor.constraint(equalToConstant: 84),
+            ringView.heightAnchor.constraint(equalToConstant: 106),
+        ])
+
+        haptic.prepare()
+        objectTracker.didReachFullCircle = { [weak self] in
+            guard let self = self else { return }
+            self.haptic.notificationOccurred(.success)
+            self.ringView.complete = true
+        }
     }
 
     private func setViewProperties() {
@@ -235,6 +316,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             } else {
                 overlayButton.isHidden = true
             }
+            config.planeDetection = objectMode ? [.horizontal, .vertical] : []
             guide.reset()
             session.run(config)
             scheduleExposureApply()
@@ -309,12 +391,6 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func startRecording() {
         guard let config = arConfiguration else { return }
-        // 월드 원점을 녹화 시작 지점으로 맞춘다. 첫 프레임은 트래킹이 normal 로 돌아온 뒤 저장한다. 메시도 비워진다.
-        session.run(config, options: [.resetTracking, .removeExistingAnchors])
-        scheduleExposureApply()
-        guide.reset()
-        awaitingTracking = true
-        trackingWaitStarted = Date()
         geoFix = nil
         captureStartedAt = nil
         bestThumbSharpness = -1
@@ -327,11 +403,34 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting])
         statsLabel.isHidden = false
+        if objectMode && worldFrameFixed {
+            // 물체 지정 때 이미 원점을 잡았다 — 리셋하면 물체 좌표가 어긋나므로 그대로 녹화한다
+            awaitingTracking = false
+            objectTracker.resetCoverage()
+            ringView.complete = false
+            beginCapture()
+        } else {
+            // 월드 원점을 녹화 시작 지점으로 맞춘다. 첫 프레임은 트래킹이 normal 로 돌아온 뒤 저장한다. 메시도 비워진다.
+            session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            scheduleExposureApply()
+            guide.reset()
+            awaitingTracking = true
+            trackingWaitStarted = Date()
+        }
     }
 
     /// 트래킹이 잡힌 첫 프레임: 이 순간의 GPS·방위(또는 지도에서 찍은 위치 + 나침반)가 스캔의 원점·기준 방위가 된다.
     private func beginCapture() {
         awaitingTracking = false
+        geoFix = fixedGeoFix ?? currentGeoFix()
+        startedRecording = Date()
+        captureStartedAt = Date()
+        guide.resetStats()
+        startRawIMU()
+    }
+
+    /// 지금 순간의 위치·방위 (지도 선택이면 그 좌표 + 나침반)
+    private func currentGeoFix() -> GeoFix? {
         let compass = LocationService.shared.snapshot()
         if scanMeta?.locationSource == "map", var manual = scanMeta?.manualFix {
             if manual.trueHeading == nil {
@@ -344,14 +443,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 manual.alt = compass?.alt
                 manual.vAcc = compass?.vAcc
             }
-            geoFix = manual
-        } else {
-            geoFix = compass
+            return manual
         }
-        startedRecording = Date()
-        captureStartedAt = Date()
-        guide.resetStats()
-        startRawIMU()
+        return compass
     }
 
     private func stopRecording() {
@@ -381,7 +475,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         switch encoder.status {
             case .allGood:
-                let stats = guide.summary()
+                var stats = guide.summary()
+                if objectMode && objectTracker.isSet {
+                    let coverage = objectTracker.coveragePercent
+                    stats.coveragePct = coverage
+                    stats.elevationBands = objectTracker.elevationBands
+                    if coverage < 70 {
+                        stats.warnings.append(String(format: "물체 둘레 커버리지 %.0f%% — 70%% 이상 권장 (한 바퀴를 더 도세요)", coverage))
+                    }
+                }
                 if stats.isPoor {
                     showSummary(stats: stats) { [weak self] keep in
                         guard let self = self else { return }
@@ -445,6 +547,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if thumbWritten {
             meta.thumbFile = "thumb.jpg"
         }
+        meta.objectMode = objectMode
+        if objectMode {
+            let center = objectTracker.center.map { [$0.x, $0.y, $0.z] }
+            meta.object = ObjectInfo(center: center,
+                                     radius: objectTracker.radius,
+                                     setBy: objectTracker.isSet ? objectTracker.setBy : "auto",
+                                     coveragePct: objectTracker.isSet ? objectTracker.coveragePercent : nil,
+                                     elevationBands: objectTracker.isSet ? objectTracker.elevationBands : nil)
+        }
         do {
             try meta.save(to: directory)
         } catch {
@@ -469,6 +580,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         var lines = stats.warnings
         if let d = stats.avgDistance {
             lines.append(String(format: "평균 거리 %.2f m, 최대 속도 %.1f m/s", d, stats.maxSpeed))
+        }
+        if let coverage = stats.coveragePct {
+            let bands = stats.elevationBands ?? [:]
+            lines.append(String(format: "둘레 커버리지 %.0f%% · 고도 낮음 %.0f%% / 중간 %.0f%% / 위 %.0f%%",
+                                coverage, bands["low"] ?? 0, bands["mid"] ?? 0, bands["high"] ?? 0))
         }
         let message = lines.joined(separator: "\n") + "\n\n이대로 올릴 수도 있지만 다시 찍으면 결과가 좋아집니다."
         let controller = UIAlertController(title: "촬영 품질 확인", message: message, preferredStyle: .alert)
@@ -501,10 +617,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
     }
 
-    // MARK: - 메시 오버레이 켜고 끄기
+    // MARK: - 메시 오버레이 / 탭
 
-    @objc func viewTapped() {
-        toggleOverlay()
+    @objc func viewTapped(_ gesture: UITapGestureRecognizer) {
+        if objectMode {
+            designateObject(at: gesture.location(in: sceneView))
+        } else {
+            toggleOverlay()
+        }
     }
 
     @objc private func overlayButtonTapped() {
@@ -524,13 +644,155 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         UserDefaults.standard.set(chosenFpsSetting, forKey: FpsUserDefaultsKey)
     }
 
+    // MARK: - 물체 모드
+
+    @objc private func objectButtonTapped() {
+        if objectTracker.isSet {
+            clearObject()
+        } else {
+            designateObject(at: CGPoint(x: sceneView.bounds.midX, y: sceneView.bounds.midY))
+        }
+    }
+
+    @objc private func radiusChanged() {
+        objectTracker.radius = radiusSlider.value
+        if let node = objectNode {
+            ObjectTracker.setRadius(radiusSlider.value, on: node)
+        }
+    }
+
+    private func clearObject() {
+        objectTracker.clear()
+        removeObjectNode()
+        radiusSlider.isHidden = true
+        ringView.isHidden = true
+        ringView.complete = false
+        reticle.isHidden = false
+        objectButton.setTitle("물체 지정", for: .normal)
+    }
+
+    /// 탭한 지점의 물체를 지정한다. 녹화 전이면 먼저 트래킹을 리셋해 월드 원점을 고정한 뒤 같은 지점을 다시 레이캐스트한다.
+    private func designateObject(at point: CGPoint) {
+        guard !awaitingFrameFix else { return }
+        if startedRecording == nil && !worldFrameFixed {
+            guard let config = arConfiguration else { return }
+            pendingDesignationPoint = point
+            objectTracker.clear()
+            removeObjectNode()
+            session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            scheduleExposureApply()
+            guide.reset()
+            awaitingFrameFix = true
+            frameFixStarted = Date()
+            guideLabel.text = "잠시 그대로 — 기준 위치를 잡는 중"
+            guideLabel.isHidden = false
+            return
+        }
+        performDesignation(at: point)
+    }
+
+    private func performDesignation(at point: CGPoint) {
+        guard let frame = session.currentFrame else { return }
+        var center: simd_float3?
+        if let query = sceneView.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .any),
+           let hit = session.raycast(query).first {
+            center = simd_make_float3(hit.worldTransform.columns.3)
+        } else if let query = sceneView.raycastQuery(from: point, allowing: .existingPlaneGeometry, alignment: .any),
+                  let hit = session.raycast(query).first {
+            center = simd_make_float3(hit.worldTransform.columns.3)
+        } else if let depthPoint = unproject(viewPoint: point, frame: frame) {
+            center = depthPoint
+        }
+        guard let c = center else {
+            guideLabel.text = "물체를 찾지 못했습니다 — 조금 더 가까이에서 다시 탭하세요"
+            guideLabel.isHidden = false
+            return
+        }
+        objectTracker.setCenter(c, setBy: "tap")
+        placeObjectNode(at: c)
+        radiusSlider.isHidden = false
+        ringView.isHidden = false
+        ringView.complete = false
+        reticle.isHidden = true
+        objectButton.setTitle("물체 해제", for: .normal)
+        haptic.prepare()
+        updateRing()
+    }
+
+    /// 깊이맵으로 화면 점을 3D 로 되돌린다 (레이캐스트 실패 시)
+    private func unproject(viewPoint: CGPoint, frame: ARFrame) -> simd_float3? {
+        guard let depthMap = frame.sceneDepth?.depthMap else { return nil }
+        let viewport = sceneView.bounds.size
+        guard viewport.width > 0, viewport.height > 0 else { return nil }
+        let normalized = CGPoint(x: viewPoint.x / viewport.width, y: viewPoint.y / viewport.height)
+        let toImage = frame.displayTransform(for: .portrait, viewportSize: viewport).inverted()
+        let imagePoint = normalized.applying(toImage)
+        guard imagePoint.x >= 0, imagePoint.x <= 1, imagePoint.y >= 0, imagePoint.y <= 1 else { return nil }
+        let depthWidth = CVPixelBufferGetWidth(depthMap)
+        let depthHeight = CVPixelBufferGetHeight(depthMap)
+        let px = Int(imagePoint.x * CGFloat(depthWidth - 1))
+        let py = Int(imagePoint.y * CGFloat(depthHeight - 1))
+        guard let depth = CaptureGuide.depth(atX: px, y: py, in: depthMap) else { return nil }
+        let imageSize = frame.camera.imageResolution
+        let intrinsics = frame.camera.intrinsics
+        let fx = intrinsics.columns.0.x
+        let fy = intrinsics.columns.1.y
+        let cx = intrinsics.columns.2.x
+        let cy = intrinsics.columns.2.y
+        let u = Float(imagePoint.x) * Float(imageSize.width)
+        let v = Float(imagePoint.y) * Float(imageSize.height)
+        let cameraPoint = simd_float4((u - cx) / fx * depth, -(v - cy) / fy * depth, -depth, 1)
+        let world = frame.camera.transform * cameraPoint
+        return simd_make_float3(world)
+    }
+
+    private func placeObjectNode(at center: simd_float3) {
+        removeObjectNode()
+        let node = ObjectTracker.makeNode(center: center, radius: objectTracker.radius)
+        sceneView.scene.rootNode.addChildNode(node)
+        objectNode = node
+    }
+
+    private func removeObjectNode() {
+        objectNode?.removeFromParentNode()
+        objectNode = nil
+    }
+
+    private func updateRing() {
+        guard objectMode, objectTracker.isSet else { return }
+        ringView.covered = objectTracker.coveredBins
+        ringView.percentText = String(format: "%.0f%%", objectTracker.coveragePercent)
+        ringView.bandPercents = ObjectTracker.Band.allCases.map { objectTracker.bandPercent($0) }
+    }
+
     // MARK: - ARSessionDelegate
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         frameCounter += 1
+        if awaitingFrameFix {
+            var ready = false
+            if case .normal = frame.camera.trackingState {
+                ready = true
+            } else if let t0 = frameFixStarted, Date().timeIntervalSince(t0) > trackingWaitTimeout {
+                ready = true
+            }
+            if ready {
+                awaitingFrameFix = false
+                worldFrameFixed = true
+                fixedGeoFix = currentGeoFix()
+                if let point = pendingDesignationPoint {
+                    performDesignation(at: point)
+                }
+                pendingDesignationPoint = nil
+            }
+        }
         let capturing = startedRecording != nil && !awaitingTracking
         if frameCounter % 6 == 0 {
             updateGuidance(frame: frame, capturing: capturing)
+            if objectMode {
+                objectTracker.update(cameraTransform: frame.camera.transform, timestamp: frame.timestamp, recording: capturing)
+                updateRing()
+            }
         }
         guard startedRecording != nil, let encoder = datasetEncoder else { return }
         if awaitingTracking {
@@ -579,7 +841,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private func updateGuidance(frame: ARFrame, capturing: Bool) {
         let guidance = guide.evaluate(frame: frame, recording: capturing)
         var trackingText = guidance.trackingText
-        if let depth = guidance.centerDepth {
+        if objectMode, objectTracker.isSet {
+            trackingText += String(format: " · 물체 %.2f m", objectTracker.distance)
+        } else if let depth = guidance.centerDepth {
             trackingText += String(format: " · %.2f m", depth)
         }
         trackingLabel.text = trackingText
@@ -587,20 +851,33 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             ? UIColor.black.withAlphaComponent(0.55)
             : UIColor.systemOrange.withAlphaComponent(0.85)
 
-        var text = guidance.warning
+        if awaitingFrameFix { return }
+
+        var text: String?
+        if !guidance.trackingOK {
+            text = guidance.warning
+        } else if objectMode, let objectWarning = objectTracker.warning() {
+            text = objectWarning
+        } else {
+            text = guidance.warning
+        }
         let isWarning = text != nil
         if text == nil {
-            // 모드 힌트: 녹화 전, 그리고 녹화 시작 8초 동안
-            let showHint: Bool
-            if startedRecording == nil {
-                showHint = true
-            } else if let began = captureStartedAt {
-                showHint = Date().timeIntervalSince(began) < 8
+            if objectMode {
+                text = objectTracker.hint(recording: startedRecording != nil)
             } else {
-                showHint = true
-            }
-            if showHint {
-                text = modeHint()
+                // 모드 힌트: 녹화 전, 그리고 녹화 시작 8초 동안
+                let showHint: Bool
+                if startedRecording == nil {
+                    showHint = true
+                } else if let began = captureStartedAt {
+                    showHint = Date().timeIntervalSince(began) < 8
+                } else {
+                    showHint = true
+                }
+                if showHint {
+                    text = modeHint()
+                }
             }
         }
         guideLabel.text = text

@@ -36,6 +36,9 @@ struct CaptureStats: Codable, Hashable {
     var sharpnessMedian: Float
     var sharpnessMax: Float
     var warnings: [String]
+    /// 물체 모드: 방위 커버리지 % 와 고도 3단 %
+    var coveragePct: Float? = nil
+    var elevationBands: [String: Float]? = nil
 
     var isPoor: Bool { !warnings.isEmpty }
 }
@@ -56,6 +59,10 @@ final class CaptureGuide {
     static let home = Thresholds(minDistance: 0.3, maxDistance: 3.0, maxSpeed: 0.7, maxRotation: 60,
                                  tooCloseText: "너무 가깝습니다 (%.2f m) — 30 cm 이상 떨어지세요",
                                  tooFarText: "너무 멉니다 (%.1f m) — 3 m 이내로 다가가세요")
+    /// 물체 모드: 물체까지 35~90 cm
+    static let object = Thresholds(minDistance: 0.35, maxDistance: 0.9, maxSpeed: 0.5, maxRotation: 60,
+                                   tooCloseText: "너무 가깝습니다 (%.2f m) — 35 cm 이상 떨어지세요",
+                                   tooFarText: "너무 멉니다 (%.1f m) — 90 cm 이내로")
 
     var thresholds: Thresholds = CaptureGuide.home
 
@@ -241,6 +248,33 @@ final class CaptureGuide {
             }
         }
         guard values.count >= 20 else { return nil }
+        values.sort()
+        return values[values.count / 2]
+    }
+
+    /// 깊이맵의 (x, y) 주변 5×5 창의 중앙값 (m). 유효 값이 없으면 nil
+    static func depth(atX x: Int, y: Int, in map: CVPixelBuffer) -> Float? {
+        guard CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32 else { return nil }
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(map) else { return nil }
+        let width = CVPixelBufferGetWidth(map)
+        let height = CVPixelBufferGetHeight(map)
+        let rowBytes = CVPixelBufferGetBytesPerRow(map)
+        guard width > 0, height > 0 else { return nil }
+        let cx = min(max(x, 0), width - 1)
+        let cy = min(max(y, 0), height - 1)
+        var values: [Float] = []
+        for j in max(0, cy - 2)...min(height - 1, cy + 2) {
+            let row = base.advanced(by: j * rowBytes).assumingMemoryBound(to: Float.self)
+            for i in max(0, cx - 2)...min(width - 1, cx + 2) {
+                let value = row[i]
+                if value.isFinite && value > 0 {
+                    values.append(value)
+                }
+            }
+        }
+        guard !values.isEmpty else { return nil }
         values.sort()
         return values[values.count / 2]
     }

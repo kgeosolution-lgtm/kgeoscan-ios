@@ -75,6 +75,18 @@ struct UploadAttempt: Codable, Hashable {
     var error: String?
 }
 
+/// 물체 모드 기록 (meta.json 의 object). 업로드 필드 obj_center / obj_radius / obj_coverage 의 원본
+struct ObjectInfo: Codable, Hashable {
+    /// [x, y, z] 미터, ARKit 월드 좌표. 지정하지 않았으면 nil (서버가 자동 계산)
+    var center: [Float]?
+    var radius: Float
+    /// tap | auto
+    var setBy: String
+    var coveragePct: Float?
+    /// low / mid / high 각 방위 커버리지 %
+    var elevationBands: [String: Float]?
+}
+
 struct ScanMeta: Codable, Hashable {
     static let fileName = "meta.json"
 
@@ -110,6 +122,10 @@ struct ScanMeta: Codable, Hashable {
     var folderBytes: Int64?
     /// 대표 이미지 파일 이름 (녹화 중 가장 선명한 프레임, 폴더 안)
     var thumbFile: String?
+    /// 물체 모드(현장조사 소형 물체). 업로드 필드 object_mode=1
+    var objectMode: Bool?
+    /// 물체 중심·반경·커버리지 (ARKit 월드 좌표 = odometry.csv 좌표계)
+    var object: ObjectInfo?
     var fix: GeoFix?
     var upload: UploadRecord?
     /// 이 녹화의 업로드 식별자. 앱이 한 번 만들어 재시도해도 같은 값을 upload 필드 client_id 로 보낸다

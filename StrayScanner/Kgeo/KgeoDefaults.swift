@@ -37,6 +37,12 @@ enum KgeoDefaults {
     static let autoUploadKey = "kgeo.autoUpload"
     /// 위치 입력 방식: gps | map
     static let locationSourceKey = "kgeo.locationSource"
+    /// 현장조사에서 물체 모드 (기본 켬)
+    static let objectModeKey = "kgeo.objectMode"
+
+    static var objectModeDefault: Bool {
+        UserDefaults.standard.object(forKey: objectModeKey) == nil ? true : UserDefaults.standard.bool(forKey: objectModeKey)
+    }
 
     static var autoUpload: Bool {
         UserDefaults.standard.object(forKey: autoUploadKey) == nil ? true : UserDefaults.standard.bool(forKey: autoUploadKey)

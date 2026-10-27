@@ -246,6 +246,19 @@ final class UploadViewModel: ObservableObject {
             body.addField("scan_type", meta.mode.rawValue)   // home | survey (서버 scan_points.scan_type)
             body.addField("client_id", meta.clientId ?? "")
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
+            if meta.objectMode == true {
+                // 물체 모드: 서버가 obj_center 반경 obj_radius 안만 잘라 복원한다. 중심이 없으면 서버가 자동 계산
+                body.addField("object_mode", "1")
+                if let object = meta.object {
+                    if let center = object.center, center.count == 3 {
+                        body.addField("obj_center", String(format: "%.4f,%.4f,%.4f", center[0], center[1], center[2]))
+                    }
+                    body.addField("obj_radius", String(format: "%.2f", object.radius))
+                    if let coverage = object.coveragePct {
+                        body.addField("obj_coverage", String(format: "%.0f", coverage))
+                    }
+                }
+            }
             if let fix = meta.fix {
                 body.addField("lon", String(format: "%.8f", fix.lon))
                 body.addField("lat", String(format: "%.8f", fix.lat))

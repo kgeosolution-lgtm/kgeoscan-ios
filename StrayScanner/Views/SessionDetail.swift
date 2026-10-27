@@ -205,6 +205,9 @@ struct SessionDetailView: View {
                 if let stats = meta.captureStats {
                     detailRow("촬영", value: captureSummary(stats))
                 }
+                if meta.objectMode == true {
+                    detailRow("물체", value: objectSummary(meta.object))
+                }
                 if let upload = meta.upload {
                     detailRow("업로드", value: uploadSummary(upload))
                 } else {
@@ -247,6 +250,23 @@ struct SessionDetailView: View {
         parts.append(String(format: "최대 속도 %.1f m/s", stats.maxSpeed))
         if let c = stats.highConfidenceRatio { parts.append(String(format: "깊이 신뢰 %.0f%%", c * 100)) }
         if !stats.warnings.isEmpty { parts.append("경고 \(stats.warnings.count)건") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func objectSummary(_ object: ObjectInfo?) -> String {
+        guard let object = object else { return "물체 모드 (중심 미지정)" }
+        var parts: [String] = []
+        if object.center != nil {
+            parts.append(String(format: "반경 %.2f m", object.radius))
+        } else {
+            parts.append("중심 미지정 (서버 자동)")
+        }
+        if let coverage = object.coveragePct {
+            parts.append(String(format: "둘레 %.0f%%", coverage))
+        }
+        if let bands = object.elevationBands {
+            parts.append(String(format: "위 %.0f%%", bands["high"] ?? 0))
+        }
         return parts.joined(separator: " · ")
     }
 
