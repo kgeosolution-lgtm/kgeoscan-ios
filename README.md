@@ -67,7 +67,10 @@ zip 은 압축하지 않고 담기만 한다(mp4·png 는 이미 압축됨). 폴
   `kgeoScan.ipa` 를 아티팩트로 올리고, 기본 브랜치면 프리릴리스 **latest** 에, `v*` 태그면 정식 릴리스에 붙인다.
 - **Mac 에서 직접**: `brew install xcodegen && xcodegen generate && open kgeoScan.xcodeproj`. 프로젝트 원본은
   [project.yml](project.yml) 이고 `.xcodeproj` 는 커밋하지 않는다. 배포 타깃 iOS 16, 패키지는 ZIPFoundation (SPM) 하나.
-- 이 저장소는 Windows 에서 편집만 하고 컴파일은 CI 에 맡긴다. 러너 로그에서 오류를 읽고 고쳐 다시 push 한다.
+- 이 저장소는 Windows 에서 편집만 하고 컴파일은 CI 에 맡긴다. GitHub 는 로그인해야 러너 로그를 보여 주므로, 빌드가 실패하면
+  워크플로가 오류 줄을 check-run annotation(API 로 공개 조회 가능)과 프리릴리스 **ci-logs** 의 `errors.txt` / `xcodebuild.log`
+  (로그인 없이 내려받기 가능)로 올린다. 문서(`*.md`, `docs/`, `scripts/`)만 바뀐 push 는 빌드하지 않는다.
+- 첫 성공 빌드(2026-10-27)는 Xcode 26.3 / iOS 26.2 SDK 로 만들어졌고, 결과 앱은 iOS 16 이상에서 돈다.
 
 ## 폴더
 
