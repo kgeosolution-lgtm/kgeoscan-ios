@@ -38,11 +38,13 @@ final class ObjectTracker {
     static let minDistance: Float = 0.35
     static let maxDistance: Float = 0.9
     static let fullCircleBins = 33   // 330° 이상
-    static let minRadius: Float = 0.1
+    /// 반경 범위·기본값 (2026-10-28 실기기: 0.25 m 는 책상·모니터 조각이 남아 0.15 m 로 낮춤. 서버도 받침면 위 덩어리로 자동 좁힘)
+    static let minRadius: Float = 0.05
     static let maxRadius: Float = 0.6
+    static let defaultRadius: Float = 0.15
 
     private(set) var center: simd_float3?
-    var radius: Float = 0.25
+    var radius: Float = ObjectTracker.defaultRadius
     private(set) var setBy: String = "auto"
     private(set) var coveredBins = Set<Int>()
     private(set) var bandBins: [Set<Int>] = [[], [], []]

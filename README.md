@@ -35,7 +35,7 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 - **촬영 통계와 요약**: 녹화 중 거리·속도·깊이 신뢰도·선명도를 모아 `capture_stats` 로 저장하고, 기준에 못 미치면 종료 때 "촬영 품질 확인" 창에서
   '다시 찍기(삭제)' 를 제안한다. 기준은 2026-10-27 컵 녹화 분석(0.21 m 근접, 1.66 m/s, 흐림)에서 잡았다: 현장조사 0.4~1.5 m·0.5 m/s, 홈스캔 0.3~3 m·0.7 m/s.
 - **물체 모드** ([ObjectTracker.swift](StrayScanner/Kgeo/ObjectTracker.swift), 현장조사에서 기본 켬): 녹화 화면에서 물체를 탭하면
-  ARKit 레이캐스트(estimatedPlane → existingPlaneGeometry → 깊이맵 역투영)로 중심을 잡고 반투명 구(반경 0.1~0.6 m, 슬라이더)로 자를 영역을
+  ARKit 레이캐스트(estimatedPlane → existingPlaneGeometry → 깊이맵 역투영)로 중심을 잡고 반투명 구(반경 0.05~0.6 m, 기본 0.15 m, 슬라이더)로 자를 영역을
   보여 준다. 카메라 방위각을 10° 36칸으로 나눠 지나간 칸을 링으로 채우고(한 바퀴 330° 이상이면 진동 + ✓), 고도 3단(<20°/20~45°/>45°)과
   "이제 위에서 한 바퀴" 안내, 거리 0.35~0.9 m·회전 속도 경고를 낸다. **녹화 전에 물체를 지정하면 그 순간 트래킹을 리셋해 월드 원점을 고정**하고
   녹화 시작 때는 다시 리셋하지 않으므로 물체 좌표와 `odometry.csv` 가 같은 좌표계다. `meta.json` 의
@@ -54,7 +54,7 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 |---|---|
 | `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `scan_type=home|survey`(모드), `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip), `client_id`(녹화마다 한 번 만든 UUID, 재시도해도 같음), `app`. 응답 `{"job_id": "...", "mode": "stray", "scan_type": "home"}` 또는 `{"error": "..."}`. 같은 제목·같은 zip 이름으로 24시간 안에 만든 작업이 있으면 서버가 새로 만들지 않고 그 `job_id` 를 `"duplicate": true` 와 함께 돌려준다 |
 | `GET {서버}/status.py?job_id=` | `{status, step 0..7, step_name, message, title, mode, scan_type, thumb_url, scene_item_id, glb_url}` — `done`/`failed` 가 될 때까지 3초마다 조회 |
-| 물체 모드 필드 | 현장조사 + 물체 모드일 때 `object_mode=1`. 물체를 지정했으면 `obj_center="x,y,z"`(미터, ARKit 월드 좌표 = `odometry.csv` 좌표계, 소수 4자리), `obj_radius="0.25"`(미터), `obj_coverage="0..100"`(방위 커버리지 %). 지정하지 않았으면 `obj_center` 없이 `object_mode=1` 만 (서버가 카메라 시선 교점으로 자동 계산) |
+| 물체 모드 필드 | 현장조사 + 물체 모드일 때 `object_mode=1`. 물체를 지정했으면 `obj_center="x,y,z"`(미터, ARKit 월드 좌표 = `odometry.csv` 좌표계, 소수 4자리), `obj_radius="0.15"`(미터, 기본 0.15), `obj_coverage="0..100"`(방위 커버리지 %). 지정하지 않았으면 `obj_center` 없이 `object_mode=1` 만 (서버가 카메라 시선 교점으로 자동 계산). 서버는 구 안에서 받침면 위로 솟은 덩어리를 물체로 보고 더 좁혀 자른다 |
 | 진행 페이지 | `{서버}` 의 `3dupload` 를 `3dscan` 으로 바꾼 주소 + `?job=<job_id>` — 사이트가 7단계 진행과 결과를 이어서 보여 준다 ("웹에서 진행 보기" 버튼) |
 | 결과 페이지 | 같은 주소 + `?select=<scene_item_id>` (없으면 `?job=`) |
 
