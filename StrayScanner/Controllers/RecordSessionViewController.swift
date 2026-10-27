@@ -6,17 +6,22 @@
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
 //  kgeoScan 변경:
+//  - 화면: Stray 의 Metal 깊이/RGB 뷰 대신 ARSCNView 가 실제 카메라 화면을 그리고, 그 위에 ARKit
+//    sceneReconstruction 메시(ARMeshAnchor)를 반투명 면으로 덮어 "어디를 찍었는지" 보여 준다 (탭하면 끄고 켬).
 //  - 녹화 시작 시 ARKit 트래킹을 리셋해 월드 원점을 녹화 시작 지점으로 맞춘다
-//    (서버는 원점을 lon/lat/elev 에 놓고, -z(정면)를 heading 방위로 돌린다).
+//    (서버는 원점을 lon/lat/elev 에 놓고, -z(정면)를 heading 방위로 돌린다). 메시도 이때 비워진다.
 //  - 트래킹이 normal 이 된 첫 프레임에서 GPS·나침반 스냅샷을 찍는다.
+//  - 촬영 안내: 트래킹 상태, LiDAR 거리(0.3~3 m), 움직임 속도 경고, 모드별 힌트.
+//  - 노출 옵션(빠른 셔터)으로 모션블러를 줄인다.
 //  - 녹화가 끝나면 meta.json 을 쓰고 onFinished(녹화 폴더) 를 부른다.
-//  - 화면 위에 GPS/방위 상태를 보여 준다.
+//  녹화 데이터(DatasetEncoder 이하)는 원본 그대로다.
 //
 
 import Foundation
 import UIKit
 import Metal
 import ARKit
+import SceneKit
 import CoreData
 import CoreMotion
 
@@ -40,15 +45,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var arConfiguration: ARWorldTrackingConfiguration?
     private let session = ARSession()
     private let motionManager = CMMotionManager()
-    private var renderer: CameraRenderer?
     private var updateLabelTimer: Timer?
     private var startedRecording: Date?
     private var dataContext: NSManagedObjectContext!
     private var datasetEncoder: DatasetEncoder?
     private let imuOperationQueue = OperationQueue()
     private var chosenFpsSetting: Int = 0
-    @IBOutlet private var rgbView: MetalView!
-    @IBOutlet private var depthView: MetalView!
+    @IBOutlet private var rgbView: UIView!
+    @IBOutlet private var depthView: UIView!
     @IBOutlet private var recordButton: RecordButton!
     @IBOutlet private var timeLabel: UILabel!
     @IBOutlet weak var fpsButton: UIButton!
@@ -63,8 +67,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var trackingWaitStarted: Date?
     private let trackingWaitTimeout: TimeInterval = 3.0
     private var geoFix: GeoFix?
-    private let geoLabel = UILabel()
+    private var captureStartedAt: Date?
+    private let geoLabel = PaddedLabel()
+    private let trackingLabel = PaddedLabel()
+    private let guideLabel = PaddedLabel()
+    private let overlayButton = UIButton(type: .system)
     private var geoLabelTimer: Timer?
+    private let sceneView = ARSCNView(frame: .zero)
+    private let meshOverlay = MeshOverlayDelegate()
+    private var meshSupported = false
+    private let guide = CaptureGuide()
+    private let exposure = ExposureController()
+    private var frameCounter = 0
 
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
@@ -80,11 +94,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         super.viewDidLoad()
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
         self.dataContext = appDelegate.persistentContainer.newBackgroundContext()
-        self.renderer = CameraRenderer(rgbLayer: rgbView.layer, depthLayer: depthView.layer)
 
-        depthView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
-        rgbView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
-
+        setupSceneView()
+        setupOverlayViews()
         setViewProperties()
         session.delegate = self
 
@@ -96,7 +108,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
         imuOperationQueue.qualityOfService = .userInitiated
 
-        setupGeoLabel()
+        rgbView.isHidden = true
         LocationService.shared.start()
     }
 
@@ -110,6 +122,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateLabelTimer?.invalidate()
         geoLabelTimer?.invalidate()
         geoLabelTimer = nil
+        exposure.stop()
         datasetEncoder = nil
     }
 
@@ -122,6 +135,79 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateGeoLabel()
     }
 
+    // MARK: - 화면 구성
+
+    private func setupSceneView() {
+        sceneView.translatesAutoresizingMaskIntoConstraints = false
+        depthView.addSubview(sceneView)
+        NSLayoutConstraint.activate([
+            sceneView.leadingAnchor.constraint(equalTo: depthView.leadingAnchor),
+            sceneView.trailingAnchor.constraint(equalTo: depthView.trailingAnchor),
+            sceneView.topAnchor.constraint(equalTo: depthView.topAnchor),
+            sceneView.bottomAnchor.constraint(equalTo: depthView.bottomAnchor),
+        ])
+        sceneView.session = session
+        sceneView.delegate = meshOverlay
+        sceneView.scene = SCNScene()
+        sceneView.automaticallyUpdatesLighting = false
+        sceneView.rendersCameraGrain = false
+        sceneView.rendersMotionBlur = false
+        sceneView.antialiasingMode = .none
+        sceneView.preferredFramesPerSecond = 30
+        sceneView.backgroundColor = .black
+        sceneView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped)))
+    }
+
+    private func setupOverlayViews() {
+        for label in [geoLabel, trackingLabel, guideLabel] {
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+            label.textColor = .white
+            label.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+            label.layer.cornerRadius = 8
+            label.layer.masksToBounds = true
+            label.textAlignment = .center
+            label.numberOfLines = 1
+            view.addSubview(label)
+        }
+        geoLabel.text = "위치 확인 중…"
+        trackingLabel.text = "트래킹 준비"
+        guideLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        guideLabel.numberOfLines = 2
+        guideLabel.isHidden = true
+
+        overlayButton.translatesAutoresizingMaskIntoConstraints = false
+        overlayButton.setTitle("메시 켜짐", for: .normal)
+        overlayButton.titleLabel?.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        overlayButton.setTitleColor(.white, for: .normal)
+        overlayButton.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        overlayButton.layer.cornerRadius = 8
+        overlayButton.contentEdgeInsets = UIEdgeInsets(top: 5, left: 10, bottom: 5, right: 10)
+        overlayButton.addTarget(self, action: #selector(overlayButtonTapped), for: .touchUpInside)
+        view.addSubview(overlayButton)
+
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            geoLabel.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
+            geoLabel.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            trackingLabel.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
+            trackingLabel.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            trackingLabel.leadingAnchor.constraint(greaterThanOrEqualTo: geoLabel.trailingAnchor, constant: 8),
+            guideLabel.bottomAnchor.constraint(equalTo: depthView.bottomAnchor, constant: -12),
+            guideLabel.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
+            guideLabel.widthAnchor.constraint(lessThanOrEqualTo: safe.widthAnchor, constant: -24),
+            overlayButton.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            overlayButton.bottomAnchor.constraint(equalTo: guideLabel.topAnchor, constant: -8),
+        ])
+        geoLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    private func setViewProperties() {
+        self.view.backgroundColor = UIColor(named: "BackgroundColor")
+    }
+
+    // MARK: - AR 세션
+
     private func startSession() {
         let config = ARWorldTrackingConfiguration()
         arConfiguration = config
@@ -130,7 +216,22 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             unsupported = true
         } else {
             config.frameSemantics.insert(.sceneDepth)
+            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+                config.sceneReconstruction = .mesh
+                meshSupported = true
+            } else {
+                overlayButton.isHidden = true
+            }
+            guide.reset()
             session.run(config)
+            scheduleExposureApply()
+        }
+    }
+
+    /// 세션이 돈 뒤 카메라 장치가 준비되면 노출 설정을 적용한다 (리셋 뒤에도 다시 부른다)
+    private func scheduleExposureApply() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
+            self?.exposure.apply()
         }
     }
 
@@ -177,6 +278,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
     }
 
+    // MARK: - 녹화
+
     private func toggleRecording(_ recording: Bool) {
         if unsupported {
             showUnsupportedAlert()
@@ -193,11 +296,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func startRecording() {
         guard let config = arConfiguration else { return }
-        // 월드 원점을 녹화 시작 지점으로 맞춘다. 첫 프레임은 트래킹이 normal 로 돌아온 뒤 저장한다.
+        // 월드 원점을 녹화 시작 지점으로 맞춘다. 첫 프레임은 트래킹이 normal 로 돌아온 뒤 저장한다. 메시도 비워진다.
         session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        scheduleExposureApply()
+        guide.reset()
         awaitingTracking = true
         trackingWaitStarted = Date()
         geoFix = nil
+        captureStartedAt = nil
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
@@ -211,6 +317,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         awaitingTracking = false
         geoFix = LocationService.shared.snapshot()
         startedRecording = Date()
+        captureStartedAt = Date()
         startRawIMU()
     }
 
@@ -280,6 +387,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         meta.device = ScanMeta.deviceModel()
         meta.systemVersion = UIDevice.current.systemVersion
         meta.fix = geoFix
+        meta.exposureMode = ExposureController.currentMode.rawValue
+        meta.meshOverlay = meshSupported
         do {
             try meta.save(to: directory)
         } catch {
@@ -306,17 +415,21 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         self.timeLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, roundSeconds)
     }
 
+    // MARK: - 메시 오버레이 켜고 끄기
+
     @objc func viewTapped() {
-        switch renderer!.renderMode {
-            case .depth:
-                renderer!.renderMode = RenderMode.rgb
-                rgbView.isHidden = false
-                depthView.isHidden = true
-            case .rgb:
-                renderer!.renderMode = RenderMode.depth
-                depthView.isHidden = false
-                rgbView.isHidden = true
-        }
+        toggleOverlay()
+    }
+
+    @objc private func overlayButtonTapped() {
+        toggleOverlay()
+    }
+
+    private func toggleOverlay() {
+        guard meshSupported else { return }
+        meshOverlay.isEnabled.toggle()
+        MeshOverlayDelegate.setHidden(!meshOverlay.isEnabled, in: sceneView)
+        overlayButton.setTitle(meshOverlay.isEnabled ? "메시 켜짐" : "메시 꺼짐", for: .normal)
     }
 
     @IBAction func fpsButtonTapped() {
@@ -325,8 +438,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         UserDefaults.standard.set(chosenFpsSetting, forKey: FpsUserDefaultsKey)
     }
 
+    // MARK: - ARSessionDelegate
+
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        self.renderer!.render(frame: frame)
+        frameCounter += 1
+        if frameCounter % 6 == 0 {
+            updateGuidance(frame: frame)
+        }
         guard startedRecording != nil, let encoder = datasetEncoder else { return }
         if awaitingTracking {
             var ready = false
@@ -341,30 +459,53 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         encoder.add(frame: frame)
     }
 
-    private func setViewProperties() {
-        self.view.backgroundColor = UIColor(named: "BackgroundColor")
+    // MARK: - 촬영 안내
+
+    private func updateGuidance(frame: ARFrame) {
+        let guidance = guide.evaluate(frame: frame)
+        var trackingText = guidance.trackingText
+        if let depth = guidance.centerDepth {
+            trackingText += String(format: " · %.1f m", depth)
+        }
+        trackingLabel.text = trackingText
+        trackingLabel.backgroundColor = guidance.trackingOK
+            ? UIColor.black.withAlphaComponent(0.55)
+            : UIColor.systemOrange.withAlphaComponent(0.85)
+
+        var text = guidance.warning
+        let isWarning = text != nil
+        if text == nil {
+            // 모드 힌트: 녹화 전, 그리고 녹화 시작 8초 동안
+            let showHint: Bool
+            if startedRecording == nil {
+                showHint = true
+            } else if let began = captureStartedAt {
+                showHint = Date().timeIntervalSince(began) < 8
+            } else {
+                showHint = true
+            }
+            if showHint {
+                text = modeHint()
+            }
+        }
+        guideLabel.text = text
+        guideLabel.isHidden = (text == nil)
+        guideLabel.backgroundColor = isWarning
+            ? UIColor.systemOrange.withAlphaComponent(0.9)
+            : UIColor.black.withAlphaComponent(0.55)
     }
 
-    private func setupGeoLabel() {
-        geoLabel.translatesAutoresizingMaskIntoConstraints = false
-        geoLabel.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
-        geoLabel.textColor = .white
-        geoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        geoLabel.layer.cornerRadius = 8
-        geoLabel.layer.masksToBounds = true
-        geoLabel.textAlignment = .center
-        geoLabel.numberOfLines = 1
-        geoLabel.text = "  위치 확인 중…  "
-        view.addSubview(geoLabel)
-        NSLayoutConstraint.activate([
-            geoLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            geoLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            geoLabel.heightAnchor.constraint(equalToConstant: 26),
-        ])
+    private func modeHint() -> String {
+        switch scanMeta?.mode ?? .home {
+        case .survey:
+            return "물체를 화면 중앙에 두고 0.3~3 m 거리에서 천천히 한 바퀴 돌며 찍으세요"
+        case .home:
+            return "벽과 바닥을 0.3~3 m 거리에서 천천히 훑으세요. 같은 곳을 두 번 지나면 더 좋습니다"
+        }
     }
 
     private func updateGeoLabel() {
-        geoLabel.text = "  " + LocationService.shared.shortStatus + "  "
+        geoLabel.text = LocationService.shared.shortStatus
     }
 
     private func updateFpsSetting() {

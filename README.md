@@ -22,6 +22,14 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   `confidence/NNNNNN.png`, `odometry.csv`(헤더 포함, 자세는 OpenCV 카메라 규약), `imu.csv`, `camera_matrix.csv`, `distortion/`.
   파일 이름·규약은 바꾸지 않았다 — 서버가 그대로 읽는다. [docs/format.md](docs/format.md)
 - **추가된 것**: 녹화 폴더에 `meta.json` 하나가 더 들어간다 (제목·모드·위치·방위·업로드 결과).
+- **녹화 화면** (2026-10-27): Stray 의 Metal 깊이/RGB 미리보기 대신 `ARSCNView` 가 실제 카메라 화면을 그리고, ARKit
+  `sceneReconstruction = .mesh` 의 `ARMeshAnchor` 를 파란 반투명 면 + 흰 윤곽선으로 덮어 "어디를 찍었는지" 보여 준다
+  ([StrayScanner/Kgeo/MeshOverlay.swift](StrayScanner/Kgeo/MeshOverlay.swift), 탭 또는 '메시' 버튼으로 끄고 켬). 녹화 시작의 트래킹 리셋 때 메시도 비워져
+  이번 녹화분만 보인다. 표시용일 뿐 녹화 파일에는 아무 영향이 없다.
+- **촬영 안내** ([CaptureGuide.swift](StrayScanner/Kgeo/CaptureGuide.swift)): 위 오른쪽에 트래킹 상태와 중앙 거리, 아래에 경고(트래킹 초기화·특징 부족·
+  0.3 m 미만·3 m 초과·너무 빠른 움직임 1 m/s·60°/s)와 모드별 힌트(현장조사: 물체를 중앙에 두고 천천히 한 바퀴 / 홈스캔: 벽·바닥 훑기).
+- **노출 옵션** ([ExposureController.swift](StrayScanner/Kgeo/ExposureController.swift)): 설정 화면 '빠른 셔터 1/250' 을 고르면 iOS 16 의
+  `configurableCaptureDeviceForPrimaryCamera` 로 셔터를 고정하고 ISO 로 밝기를 맞춰 모션블러를 줄인다 (사진 기반 복원용 키프레임 품질).
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,
   **-z = 그 순간 카메라 정면**이 되게 한다. 트래킹이 `normal` 로 돌아온 첫 프레임에서 GPS(lat/lon/alt)와 나침반 방위를 찍어
   `lon`/`lat`/`elev`/`heading` 으로 보낸다. 서버는 원점을 (lon, lat, elev) 에 놓고 -z 를 heading 방위로 돌린다

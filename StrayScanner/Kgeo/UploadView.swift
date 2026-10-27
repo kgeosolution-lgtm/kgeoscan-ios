@@ -263,7 +263,15 @@ final class UploadViewModel: ObservableObject {
                 progress: { [weak self] sent, total in
                     Task { @MainActor in
                         guard let self = self else { return }
-                        if sent < self.bytesSent { self.restarts += 1 }
+                        if sent < self.bytesSent {
+                            self.restarts += 1
+                            if self.transport == "background" {
+                                // iOS 가 응답을 못 받고 본문을 처음부터 다시 보내려는 것 — 서버 중복을 막기 위해 끊는다
+                                self.appendLog("iOS 가 본문을 처음부터 다시 보내려 합니다 — 중복 업로드를 막기 위해 전송을 멈춥니다", persist: true)
+                                UploadClient.shared.cancelAll()
+                                self.fail("서버 응답을 받지 못해 iOS 가 다시 보내려 해서 전송을 멈췄습니다. 서버에 이미 도착했을 수 있으니 '업로드 시작'을 다시 누르면 같은 작업으로 이어집니다 (서버 중복 방지).")
+                            }
+                        }
                         self.bytesSent = sent
                         if total > 0 { self.bytesTotal = total }
                     }

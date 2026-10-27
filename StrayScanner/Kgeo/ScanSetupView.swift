@@ -12,6 +12,7 @@ struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.serverBaseKey) private var serverBase: String = KgeoDefaults.serverBase
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
     @AppStorage(KgeoDefaults.backgroundUploadKey) private var backgroundUpload: Bool = false
+    @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
@@ -33,6 +34,21 @@ struct ScanSetupView: View {
                 }
                 .pickerStyle(.segmented)
                 Text("모드는 meta.json 과 업로드 필드 scan_type(home/survey) 으로 서버에 전달됩니다.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("촬영") {
+                Picker("노출", selection: $exposureRaw) {
+                    ForEach(ExposureController.Mode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                Text("빠른 셔터는 움직일 때 생기는 번짐(모션블러)을 줄여 사진 기반 복원에 쓸 프레임을 선명하게 합니다. 어두운 곳에서는 노이즈가 늘어나니 밝은 곳에서 쓰세요.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("녹화 화면에는 실제 카메라 화면 위에 스캔된 면이 파란 반투명으로 덮입니다. 화면을 탭하거나 '메시' 버튼으로 끄고 켤 수 있습니다. 반투명·광택 표면은 LiDAR 깊이가 비어 메시에 안 나옵니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

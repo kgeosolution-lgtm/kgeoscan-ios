@@ -96,6 +96,10 @@ struct ScanMeta: Codable, Hashable {
     var arWorldAlignment = "gravity"
     /// 녹화 시작 시 트래킹을 리셋해 월드 원점을 녹화 시작 지점으로 맞췄는지
     var trackingResetAtRecordStart = true
+    /// 노출 설정: auto | fast (빠른 셔터 1/250)
+    var exposureMode: String?
+    /// 녹화 중 ARKit 메시 재구성(화면 표시용)이 켜져 있었는지
+    var meshOverlay: Bool?
     var fix: GeoFix?
     var upload: UploadRecord?
     /// 이 녹화의 업로드 식별자. 앱이 한 번 만들어 재시도해도 같은 값을 upload 필드 client_id 로 보낸다
