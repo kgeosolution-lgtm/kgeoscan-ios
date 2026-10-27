@@ -12,9 +12,30 @@ import SceneKit
 import UIKit
 
 final class MeshOverlayDelegate: NSObject, ARSCNViewDelegate {
-    static let fillColor = UIColor(red: 0.25, green: 0.65, blue: 1.0, alpha: 0.35)
-    static let lineColor = UIColor(white: 1.0, alpha: 0.22)
     static let nodeName = "kgeo.mesh"
+    static let colorNames: [(key: String, label: String)] = [
+        ("red", "빨강"), ("orange", "주황"), ("green", "초록"), ("blue", "파랑"),
+    ]
+
+    /// 설정의 색·불투명도 (기본 빨강 0.5)
+    static var fillColor: UIColor {
+        let name = UserDefaults.standard.string(forKey: KgeoDefaults.meshColorKey) ?? "red"
+        let base: UIColor
+        switch name {
+        case "orange": base = UIColor(red: 1.0, green: 0.55, blue: 0.1, alpha: 1)
+        case "green": base = UIColor(red: 0.2, green: 0.9, blue: 0.4, alpha: 1)
+        case "blue": base = UIColor(red: 0.25, green: 0.65, blue: 1.0, alpha: 1)
+        default: base = UIColor(red: 1.0, green: 0.2, blue: 0.2, alpha: 1)
+        }
+        return base.withAlphaComponent(CGFloat(fillOpacity))
+    }
+
+    static var fillOpacity: Double {
+        let value = UserDefaults.standard.double(forKey: KgeoDefaults.meshOpacityKey)
+        return value > 0 ? min(max(value, 0.2), 0.9) : 0.5
+    }
+
+    static let lineColor = UIColor(white: 1.0, alpha: 0.65)
 
     /// 새로 만들어지는 노드에 적용된다. 기존 노드는 setHidden(_:in:) 으로 바꾼다.
     var isEnabled = true

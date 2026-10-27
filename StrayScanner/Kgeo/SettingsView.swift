@@ -12,7 +12,9 @@ struct SettingsView: View {
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
     @AppStorage(KgeoDefaults.autoUploadKey) private var autoUpload: Bool = true
     @AppStorage(KgeoDefaults.wifiOnlyKey) private var wifiOnly: Bool = false
-    @AppStorage(KgeoDefaults.backgroundUploadKey) private var backgroundUpload: Bool = false
+    @AppStorage(KgeoDefaults.uploadTransportKey) private var transportRaw: String = UploadTransport.http1.rawValue
+    @AppStorage(KgeoDefaults.meshColorKey) private var meshColor: String = "red"
+    @AppStorage(KgeoDefaults.meshOpacityKey) private var meshOpacity: Double = 0.5
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
     @AppStorage(KgeoDefaults.locationSourceKey) private var locationSourceRaw: String = "gps"
 
@@ -60,8 +62,31 @@ struct SettingsView: View {
                 Text("켜면 셀룰러에서는 Wi-Fi 가 잡힐 때까지 기다립니다 (업로드 화면 로그에 표시).")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Toggle("백그라운드로 전송 (실험)", isOn: $backgroundUpload)
-                Text("꺼짐(기본): 앱을 열어 둔 채 보내고, 끊기면 바로 오류를 보여 줍니다. 켜짐: iOS 가 대신 보내지만 응답을 못 받으면 처음부터 다시 보내려 하므로 앱이 전송을 끊고 알립니다.")
+                Picker("전송 방식", selection: $transportRaw) {
+                    Text(UploadTransport.http1.label).tag(UploadTransport.http1.rawValue)
+                    Text(UploadTransport.system.label).tag(UploadTransport.system.rawValue)
+                    Text(UploadTransport.background.label).tag(UploadTransport.background.rawValue)
+                }
+                Text("HTTP/1.1 직접 연결(기본)은 서버가 HTTP/2 를 고르지 못하게 하는 방식입니다. 2026-10-27 실기기에서 시스템 URLSession(HTTP/2)은 서버가 다 받고 응답해도 '연결이 끊어졌습니다'가 났습니다. 어느 방식이든 끊기면 서버에 작업이 생겼는지(client_id) 확인한 뒤에만 최대 3회 다시 보냅니다. 백그라운드는 화면을 꺼도 이어지지만 응답을 못 받으면 처음부터 다시 보내려 하므로 앱이 전송을 끊고 알립니다.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("메시 표시") {
+                Picker("색", selection: $meshColor) {
+                    ForEach(MeshOverlayDelegate.colorNames, id: \.key) { item in
+                        Text(item.label).tag(item.key)
+                    }
+                }
+                .pickerStyle(.segmented)
+                HStack {
+                    Text("불투명도")
+                    Slider(value: $meshOpacity, in: 0.2...0.9, step: 0.05)
+                    Text(String(format: "%.0f%%", meshOpacity * 100))
+                        .font(.caption)
+                        .frame(width: 40, alignment: .trailing)
+                }
+                Text("녹화 화면에서 스캔된 면을 덮는 색입니다. 흰 윤곽선이 함께 그려집니다. 다음 녹화 화면부터 적용됩니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

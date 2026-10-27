@@ -19,8 +19,19 @@ enum KgeoDefaults {
     static let modeKey = "kgeo.mode"
     /// true 면 백그라운드 URLSession 으로 전송 (실험). 기본 false = 앱을 열어 둔 채 전송
     static let backgroundUploadKey = "kgeo.backgroundUpload"
+    /// 전송 방식: http1 (기본, HTTP/1.1 직접 연결) | system (URLSession, HTTP/2 가능) | background (실험)
+    static let uploadTransportKey = "kgeo.uploadTransport"
     /// true 면 Wi-Fi 에서만 업로드 (셀룰러 차단, 기본 false)
     static let wifiOnlyKey = "kgeo.wifiOnly"
+    /// 메시 오버레이 색 이름(red|orange|blue|green)과 불투명도(0.2~0.8)
+    static let meshColorKey = "kgeo.meshColor"
+    static let meshOpacityKey = "kgeo.meshOpacity"
+
+    /// 저장된 전송 방식 (예전 '백그라운드' 토글과 호환)
+    static var uploadTransport: String {
+        if let raw = UserDefaults.standard.string(forKey: uploadTransportKey), !raw.isEmpty { return raw }
+        return UserDefaults.standard.bool(forKey: backgroundUploadKey) ? "background" : "http1"
+    }
     /// 녹화가 끝나면 바로 업로드 화면으로 (기본 true)
     static let autoUploadKey = "kgeo.autoUpload"
     /// 위치 입력 방식: gps | map

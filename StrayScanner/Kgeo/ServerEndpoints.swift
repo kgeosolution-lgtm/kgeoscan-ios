@@ -34,6 +34,13 @@ struct ServerEndpoints {
         base.appendingPathComponent("upload.py")
     }
 
+    /// client_id 로 이미 만들어진 작업 찾기 (서버 find_job.py). 없으면 404
+    func findJobURL(clientId: String) -> URL {
+        var components = URLComponents(url: base.appendingPathComponent("find_job.py"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "client_id", value: clientId)]
+        return components.url!
+    }
+
     func statusURL(jobId: String) -> URL {
         var components = URLComponents(url: base.appendingPathComponent("status.py"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "job_id", value: jobId)]

@@ -158,9 +158,10 @@ final class UploadViewModel: ObservableObject {
             fail("서버 주소가 올바르지 않습니다: \(meta.serverBase)")
             return
         }
-        let background = UserDefaults.standard.bool(forKey: KgeoDefaults.backgroundUploadKey)
+        let transportMode = UploadTransport(rawValue: KgeoDefaults.uploadTransport) ?? .http1
+        let isBackground = transportMode == .background
         let wifiOnly = UserDefaults.standard.bool(forKey: KgeoDefaults.wifiOnlyKey)
-        transport = background ? "background" : (wifiOnly ? "foreground (Wi-Fi 전용)" : "foreground")
+        transport = transportMode.label + (wifiOnly ? " (Wi-Fi 전용)" : "")
 
         // 이미 job_id 를 받은 스캔은 다시 올리지 않고 상태만 조회한다
         if !forceReupload, let previous = meta.upload, previous.status != "failed",
@@ -256,28 +257,71 @@ final class UploadViewModel: ObservableObject {
             request.httpMethod = "POST"
             request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            let (code, data) = try await UploadClient.shared.upload(
-                request: request, bodyFile: bodyFile, taskDescription: directory.path, background: background,
-                wifiOnly: wifiOnly,
-                log: { [weak self] line in
-                    Task { @MainActor in self?.appendLog(line) }
-                },
-                progress: { [weak self] sent, total in
-                    Task { @MainActor in
-                        guard let self = self else { return }
-                        if sent < self.bytesSent {
-                            self.restarts += 1
-                            if self.transport.hasPrefix("background") {
-                                // iOS 가 응답을 못 받고 본문을 처음부터 다시 보내려는 것 — 서버 중복을 막기 위해 끊는다
-                                self.appendLog("iOS 가 본문을 처음부터 다시 보내려 합니다 — 중복 업로드를 막기 위해 전송을 멈춥니다", persist: true)
-                                UploadClient.shared.cancelAll()
-                                self.fail("서버 응답을 받지 못해 iOS 가 다시 보내려 해서 전송을 멈췄습니다. 서버에 이미 도착했을 수 있으니 '업로드 시작'을 다시 누르면 같은 작업으로 이어집니다 (서버 중복 방지).")
+
+            // 전송. 연결이 끊기면 서버에 작업이 생겼는지(client_id) 먼저 묻고, 없을 때만 최대 3회 다시 보낸다
+            let maxAttempts = 3
+            var sendAttempt = 0
+            var code = 0
+            var data = Data()
+            while true {
+                sendAttempt += 1
+                bytesSent = 0
+                do {
+                    (code, data) = try await UploadClient.shared.upload(
+                        request: request, bodyFile: bodyFile, taskDescription: directory.path, transport: transportMode,
+                        wifiOnly: wifiOnly,
+                        log: { [weak self] line in
+                            Task { @MainActor in self?.appendLog(line) }
+                        },
+                        progress: { [weak self] sent, total in
+                            Task { @MainActor in
+                                guard let self = self else { return }
+                                if sent < self.bytesSent {
+                                    self.restarts += 1
+                                    if isBackground {
+                                        // iOS 가 응답을 못 받고 본문을 처음부터 다시 보내려는 것 — 서버 중복을 막기 위해 끊는다
+                                        self.appendLog("iOS 가 본문을 처음부터 다시 보내려 합니다 — 중복 업로드를 막기 위해 전송을 멈춥니다", persist: true)
+                                        UploadClient.shared.cancelAll()
+                                        self.fail("서버 응답을 받지 못해 iOS 가 다시 보내려 해서 전송을 멈췄습니다. 서버에 이미 도착했을 수 있으니 '업로드 시작'을 다시 누르면 같은 작업으로 이어집니다 (서버 중복 방지).")
+                                    }
+                                }
+                                self.bytesSent = sent
+                                if total > 0 { self.bytesTotal = total }
                             }
-                        }
-                        self.bytesSent = sent
-                        if total > 0 { self.bytesTotal = total }
+                        })
+                    break
+                } catch {
+                    if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                        throw error
                     }
-                })
+                    guard UploadError.isRetryable(error) else { throw error }
+                    appendLog("연결 오류: \(error.localizedDescription) — 서버에 이 녹화(client_id)로 만든 작업이 있는지 확인합니다", persist: true)
+                    if let clientId = meta.clientId, let found = await UploadClient.findJob(endpoints: endpoints, clientId: clientId) {
+                        appendLog("서버에 작업 \(found.jobId) 가 이미 있습니다 — 다시 올리지 않고 상태 조회로 넘어갑니다", persist: true)
+                        attempt.finishedAt = Date()
+                        attempt.jobId = found.jobId
+                        attempt.duplicate = true
+                        attempt.error = error.localizedDescription
+                        attempt.restarts = restarts
+                        meta.lastAttempt = attempt
+                        meta.upload = UploadRecord(server: endpoints.normalized, jobId: found.jobId, uploadedAt: Date(),
+                                                   status: found.status ?? "pending", step: 0)
+                        try? meta.save(to: directory)
+                        stage = .processing
+                        await poll(endpoints: endpoints, jobId: found.jobId)
+                        return
+                    }
+                    guard sendAttempt < maxAttempts else {
+                        appendLog("서버에 작업이 없고 재시도 \(maxAttempts)회를 모두 썼습니다", persist: true)
+                        throw error
+                    }
+                    let delay = [5, 15, 45][min(sendAttempt - 1, 2)]
+                    appendLog("서버에 작업이 없습니다. \(delay)초 뒤 같은 client_id 로 다시 보냅니다 (\(sendAttempt + 1)/\(maxAttempts))", persist: true)
+                    try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+                    meta.attemptCount = (meta.attemptCount ?? 0) + 1
+                    attempt.startedAt = Date()
+                }
+            }
             let bodyText = String(data: data.prefix(300), encoding: .utf8) ?? "(UTF-8 아님, \(data.count) 바이트)"
             appendLog("응답: HTTP \(code) \(bodyText)")
             attempt.finishedAt = Date()
@@ -410,9 +454,9 @@ struct UploadView: View {
                     Text("\(megabytes(vm.bytesSent)) / \(megabytes(vm.bytesTotal)) MB · \(vm.transport)")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text(vm.transport.hasPrefix("background")
+                    Text(vm.transport.hasPrefix("백그라운드")
                          ? "iOS 가 대신 보냅니다. 응답을 못 받고 다시 보내려 하면 앱이 전송을 멈춥니다."
-                         : "업로드 중에는 앱을 열어 두세요 (화면 자동 잠금은 꺼 두었습니다).")
+                         : "업로드 중에는 앱을 열어 두세요 (화면 자동 잠금은 꺼 두었습니다). 끊기면 서버 확인 뒤 최대 3회 다시 보냅니다.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     if vm.restarts > 0 {

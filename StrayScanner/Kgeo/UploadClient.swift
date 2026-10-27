@@ -18,6 +18,8 @@ enum UploadError: LocalizedError {
     case local(String)
     case server(String)
     case http(Int, String)
+    /// 네트워크 연결 문제 (재시도 대상)
+    case connection(String)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +27,43 @@ enum UploadError: LocalizedError {
         case .server(let m): return "서버 응답: \(m)"
         case .http(let code, let body):
             return "HTTP \(code)" + (body.isEmpty ? "" : " — \(body)")
+        case .connection(let m): return "연결 문제: \(m)"
+        }
+    }
+
+    /// 연결이 끊긴 종류의 오류인지 (서버에 본문이 도착했을 수도 있으므로 find_job 으로 확인 뒤 재시도)
+    static func isRetryable(_ error: Error) -> Bool {
+        if let e = error as? UploadError {
+            switch e {
+            case .connection: return true
+            case .http(let code, _): return code == 502 || code == 503 || code == 504
+            default: return false
+            }
+        }
+        if let e = error as? URLError {
+            switch e.code {
+            case .networkConnectionLost, .timedOut, .notConnectedToInternet, .cannotConnectToHost,
+                 .cannotFindHost, .dnsLookupFailed, .secureConnectionFailed, .resourceUnavailable:
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+}
+
+/// 전송 방식
+enum UploadTransport: String {
+    case http1 = "http1"           // HTTP/1.1 직접 연결 (기본)
+    case system = "system"         // URLSession (서버가 HTTP/2 면 HTTP/2)
+    case background = "background" // 백그라운드 URLSession (실험)
+
+    var label: String {
+        switch self {
+        case .http1: return "HTTP/1.1 직접 연결"
+        case .system: return "시스템 URLSession"
+        case .background: return "백그라운드 (실험)"
         }
     }
 }
@@ -71,6 +110,7 @@ final class UploadClient: NSObject, URLSessionDataDelegate {
     var backgroundCompletionHandler: (() -> Void)?
 
     private let lock = NSLock()
+    private var http1Uploader: Http1Uploader?
     private var buffers: [ObjectIdentifier: Data] = [:]
     private var completions: [ObjectIdentifier: Completion] = [:]
     private var progressHandlers: [ObjectIdentifier: ProgressHandler] = [:]
@@ -114,6 +154,10 @@ final class UploadClient: NSObject, URLSessionDataDelegate {
 
     /// 모든 진행 중 전송을 취소한다.
     func cancelAll() {
+        lock.lock()
+        let uploader = http1Uploader
+        lock.unlock()
+        uploader?.cancel()
         for session in [foregroundSession, foregroundWifiOnlySession, backgroundSession] {
             session.getAllTasks { tasks in
                 tasks.forEach { $0.cancel() }
@@ -122,9 +166,28 @@ final class UploadClient: NSObject, URLSessionDataDelegate {
     }
 
     /// bodyFile 을 그대로 POST 한다. 반환: (HTTP 상태 코드, 응답 본문)
-    func upload(request: URLRequest, bodyFile: URL, taskDescription: String, background: Bool, wifiOnly: Bool = false,
+    func upload(request: URLRequest, bodyFile: URL, taskDescription: String, transport: UploadTransport, wifiOnly: Bool = false,
                 log: @escaping LogHandler, progress: @escaping ProgressHandler) async throws -> (Int, Data) {
-        let session = background ? backgroundSession : (wifiOnly ? foregroundWifiOnlySession : foregroundSession)
+        if transport == .http1 {
+            guard let url = request.url else { throw UploadError.local("주소가 없습니다") }
+            let contentType = request.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+            let uploader = Http1Uploader()
+            lock.lock()
+            http1Uploader = uploader
+            lock.unlock()
+            defer {
+                lock.lock()
+                if http1Uploader === uploader { http1Uploader = nil }
+                lock.unlock()
+            }
+            return try await withCheckedThrowingContinuation { continuation in
+                uploader.upload(url: url, bodyFile: bodyFile, contentType: contentType, wifiOnly: wifiOnly,
+                                log: log, progress: progress) { result in
+                    continuation.resume(with: result)
+                }
+            }
+        }
+        let session = transport == .background ? backgroundSession : (wifiOnly ? foregroundWifiOnlySession : foregroundSession)
         let task = session.uploadTask(with: request, fromFile: bodyFile)
         task.taskDescription = taskDescription
         let key = ObjectIdentifier(task)
@@ -135,9 +198,22 @@ final class UploadClient: NSObject, URLSessionDataDelegate {
             logHandlers[key] = log
             lastSent[key] = 0
             lock.unlock()
-            log("전송 시작 (\(background ? "background" : "foreground") 세션) → \(request.url?.absoluteString ?? "?")")
+            log("전송 시작 (\(transport.label)) → \(request.url?.absoluteString ?? "?")")
             task.resume()
         }
+    }
+
+    /// 서버에 이 client_id 로 만들어진 작업이 있는지 묻는다 (find_job.py). 없거나 조회 실패면 nil
+    static func findJob(endpoints: ServerEndpoints, clientId: String) async -> (jobId: String, status: String?)? {
+        var request = URLRequest(url: endpoints.findJobURL(clientId: clientId))
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request) else { return nil }
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard code == 200, let reply = try? ScanMeta.decoder.decode(JobStatus.self, from: data),
+              let jobId = reply.jobId, !jobId.isEmpty else { return nil }
+        return (jobId, reply.status)
     }
 
     /// 응답에서 job_id 를 꺼낸다. duplicate = 서버가 같은 스캔의 기존 작업을 돌려준 경우.
