@@ -25,6 +25,7 @@ import SceneKit
 import CoreData
 import CoreMotion
 import CoreImage
+import ImageIO
 
 let FpsDividers: [Int] = [1, 2, 4, 12, 60]
 let AvailableFpsSettings: [Int] = FpsDividers.map { Int(60 / $0) }
@@ -560,7 +561,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             let image = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
             let scale = 480 / max(image.extent.width, 1)
             let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let options = [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8]
+            let qualityKey = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+            let options: [CIImageRepresentationOption: Any] = [qualityKey: 0.8]
             guard let data = context.jpegRepresentation(of: scaled, colorSpace: CGColorSpaceCreateDeviceRGB(), options: options) else { return }
             let url = directory.appendingPathComponent("thumb.jpg", isDirectory: false)
             do {
