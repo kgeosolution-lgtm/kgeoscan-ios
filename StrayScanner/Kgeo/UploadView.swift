@@ -242,11 +242,12 @@ final class UploadViewModel: ObservableObject {
             var body = MultipartBody()
             body.addField("title", meta.title)
             body.addField("note", meta.note)
-            body.addField("mode", "stray")
-            body.addField("scan_type", meta.mode.rawValue)   // home | survey (서버 scan_points.scan_type)
+            // mode: stray (영상·깊이, Stray 형식) | objcap (Object Capture: model/, images/, poses.json)
+            body.addField("mode", meta.isObjcap ? "objcap" : "stray")
+            body.addField("scan_type", meta.isObjcap ? ScanMode.survey.rawValue : meta.mode.rawValue)
             body.addField("client_id", meta.clientId ?? "")
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
-            if meta.objectMode == true {
+            if meta.objectMode == true && !meta.isObjcap {
                 // 물체 모드: 서버가 obj_center 반경 obj_radius 안만 잘라 복원한다. 중심이 없으면 서버가 자동 계산
                 body.addField("object_mode", "1")
                 if let object = meta.object {
@@ -481,6 +482,9 @@ struct UploadView: View {
                 LabeledContent("모드", value: vm.meta.mode.label)
                 if let frames = vm.meta.savedFrames, let duration = vm.meta.durationSeconds {
                     LabeledContent("녹화", value: String(format: "%.0f초 · %d 프레임", duration, frames))
+                }
+                if let info = vm.meta.objcap {
+                    LabeledContent("사진", value: "\(info.images)장 · 폰 3D " + (info.reconstruction == "device" ? "완료" : "없음"))
                 }
                 if let fix = vm.meta.fix {
                     LabeledContent("위치", value: String(format: "%.6f, %.6f", fix.lat, fix.lon))

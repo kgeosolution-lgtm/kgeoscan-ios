@@ -15,6 +15,7 @@ import CoreData
 enum ScanRoute: Hashable {
     case setup
     case record(ScanMeta)
+    case objcap(ScanMeta)
     case preview(URL)
     case upload(URL)
     case settings
@@ -158,8 +159,16 @@ struct SessionList: View {
                 switch route {
                 case .setup:
                     ScanSetupView { meta in
-                        path.append(.record(meta))
+                        path.append(meta.isObjcap ? .objcap(meta) : .record(meta))
                     }
+                case .objcap(let meta):
+                    ObjcapRouteView(meta: meta, onFinished: { directory in
+                        afterCapture(directory)
+                    }, onCancel: {
+                        if !path.isEmpty {
+                            path.removeLast()
+                        }
+                    })
                 case .record(let meta):
                     RecordScreen(meta: meta) { directory in
                         afterCapture(directory)
@@ -167,7 +176,7 @@ struct SessionList: View {
                 case .preview(let directory):
                     PreviewView(directory: directory, context: .afterCapture,
                                 onUpload: { path = [.upload(directory)] },
-                                onRetake: { fresh in path = [.setup, .record(fresh)] },
+                                onRetake: { fresh in path = [.setup, fresh.isObjcap ? .objcap(fresh) : .record(fresh)] },
                                 onLater: { path = [] })
                 case .upload(let directory):
                     UploadView(directory: directory)

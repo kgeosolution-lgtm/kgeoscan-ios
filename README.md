@@ -40,6 +40,19 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   "이제 위에서 한 바퀴" 안내, 거리 0.35~0.9 m·회전 속도 경고를 낸다. **녹화 전에 물체를 지정하면 그 순간 트래킹을 리셋해 월드 원점을 고정**하고
   녹화 시작 때는 다시 리셋하지 않으므로 물체 좌표와 `odometry.csv` 가 같은 좌표계다. `meta.json` 의
   `object: {center, radius, set_by, coverage_pct, elevation_bands}` 로 저장되고 종료 요약에 커버리지가 나오며 70% 미만이면 다시 찍기를 제안한다.
+- **촬영 뒤 미리보기** ([PreviewView.swift](StrayScanner/Kgeo/PreviewView.swift), [PreviewMesh.swift](StrayScanner/Kgeo/PreviewMesh.swift)):
+  촬영이 끝나면 바로 올리지 않고 3D 를 손가락으로 돌려 본 뒤 **[업로드] [다시 찍기 (이 녹화 삭제)] [나중에 올리기]** 를 고른다.
+  영상 방식은 녹화 중 0.7초마다 색 키프레임(240 px RGB + LiDAR 깊이 + 자세)을 모으고, 끝에 ARKit 메시(ARMeshAnchor)를 월드 좌표로 합쳐
+  정점 색(가림 검사 포함)을 입혀 `preview/preview_mesh.ply` 로 저장한다(물체 모드는 구 안만). Object Capture 방식은 폰에서 만든 `model/*.obj` 를 보여 준다.
+  촬영 요약(시간·프레임·거리·속도·깊이 신뢰·커버리지·경고 시간), 업로드 크기, 셀룰러 경고를 함께 보여 준다. 목록의 녹화 상세에서도 '3D 미리보기' 로 연다.
+  설정의 '녹화 뒤 미리보기 없이 바로 업로드' 를 켜면 건너뛴다. `preview/` 는 업로드 zip 에서 빠진다.
+- **물체 모드 고화질 사진** ([ObjectCaptureFlow.swift](StrayScanner/Kgeo/ObjectCaptureFlow.swift), iOS 17+, `ObjectCaptureSession.isSupported` 기기):
+  현장조사 + 물체 모드에서 촬영 방식 '고화질 사진'(기본)을 고르면 Apple `ObjectCaptureView` 로 물체 찾기 → 자동 촬영 → 바퀴 완료 시
+  '위에서 한 바퀴 더 / 물체를 뒤집고 / 촬영 끝내기' 를 고른다(한국어 안내·피드백). 끝나면 `PhotogrammetrySession` 으로 폰에서
+  `model/` 에 OBJ+MTL+텍스처를 만든다 — **iOS 는 detail `.reduced` 만 지원** (Apple 문서: "On iOS, only one detail level – .reduced – is currently supported";
+  `.medium`/`.preview` 는 macOS 전용). 사진은 `images/*.jpg`(긴 변 최대 4032, 품질 0.85, 센서 방향 그대로, EXIF orientation 미적용)로 바꾸고,
+  `.poses` 결과로 `poses.json`(사진별 4×4 열 우선 카메라→모델 변환, 내부 파라미터는 HEIC 깊이 보정값 또는 EXIF 35mm 환산, JPEG 해상도 기준)을 쓴다.
+  업로드 필드 `mode=objcap`, `scan_type=survey`. zip 에는 `model/`, `images/`, `poses.json`, `thumb.jpg`, `meta.json` 만 들어가고 원본 HEIC(`heic/`)와 `checkpoint/` 는 폰에 남는다.
 - **목록·설정**: 썸네일(녹화 중 가장 선명한 프레임 `thumb.jpg`), 용량, 배지(미업로드/업로드 중/처리 중/완료/실패), 스와이프 삭제.
   설정(톱니): 서버 주소, 기본 스캔 유형·위치 입력, 녹화 뒤 자동 업로드, Wi-Fi 에서만 업로드, 백그라운드 전송(실험), 노출.
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,

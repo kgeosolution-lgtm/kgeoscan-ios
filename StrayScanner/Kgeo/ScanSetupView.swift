@@ -15,6 +15,7 @@ struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.locationSourceKey) private var locationSourceRaw: String = "gps"
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
     @AppStorage(KgeoDefaults.objectModeKey) private var objectMode: Bool = true
+    @AppStorage(KgeoDefaults.captureMethodKey) private var captureMethod: String = "objcap"
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
@@ -44,9 +45,24 @@ struct ScanSetupView: View {
                     .foregroundColor(.secondary)
                 if modeRaw == ScanMode.survey.rawValue {
                     Toggle("물체 모드 (소형 물체 360° 촬영)", isOn: $objectMode)
-                    Text("녹화 화면에서 물체를 탭하면 자를 영역(반투명 구)이 표시되고, 둘레를 얼마나 돌았는지 링 게이지로 보여 줍니다. 서버는 그 영역만 잘라 복원합니다.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if objectMode {
+                        if ObjcapSupport.isAvailable {
+                            Picker("촬영 방식", selection: $captureMethod) {
+                                Text("고화질 사진").tag("objcap")
+                                Text("영상 (LiDAR)").tag("video")
+                            }
+                            .pickerStyle(.segmented)
+                            Text(captureMethod == "objcap"
+                                 ? "Apple Object Capture: 물체 둘레를 2~3바퀴 돌면 사진을 자동으로 찍고, 폰에서 3D 모델(reduced 품질)을 만든 뒤 사진·카메라 위치와 함께 올립니다. 서버는 사진으로 더 높은 품질을 만들 수 있습니다. 촬영 뒤 생성에 몇 분 걸립니다."
+                                 : "영상 방식: 녹화 화면에서 물체를 탭하면 자를 영역(반투명 구)이 표시되고, 둘레를 얼마나 돌았는지 링 게이지로 보여 줍니다. 서버는 그 영역만 잘라 복원합니다.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("이 기기(또는 iOS 버전)는 Object Capture 를 지원하지 않아 영상 방식으로 찍습니다. 녹화 화면에서 물체를 탭하면 자를 영역이 표시됩니다.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
             }
 
@@ -195,6 +211,8 @@ struct ScanSetupView: View {
                             serverBase: endpoints.normalized)
         meta.locationSource = locationSourceRaw
         meta.objectMode = (meta.mode == .survey) && objectMode
+        let useObjectCapture = meta.objectMode == true && captureMethod == "objcap" && ObjcapSupport.isAvailable
+        meta.capture = useObjectCapture ? "objcap" : "video"
         if locationSourceRaw == "map" {
             guard let c = pickedCoordinate else {
                 validationMessage = "지도에서 스캔 위치를 찍어 주세요."

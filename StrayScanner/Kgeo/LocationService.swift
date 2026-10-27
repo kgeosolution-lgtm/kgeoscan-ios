@@ -94,6 +94,23 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         return fix
     }
 
+    /// 스캔 설정에 맞춘 위치·방위: 지도에서 고른 위치면 그 좌표 + 지금 나침반, 아니면 GPS 스냅샷
+    func fix(for meta: ScanMeta?) -> GeoFix? {
+        let compass = snapshot()
+        guard meta?.locationSource == "map", var manual = meta?.manualFix else { return compass }
+        if manual.trueHeading == nil {
+            manual.trueHeading = compass?.trueHeading
+            manual.magneticHeading = compass?.magneticHeading
+            manual.headingAccuracy = compass?.headingAccuracy
+            manual.headingTime = compass?.headingTime
+        }
+        if manual.alt == nil {
+            manual.alt = compass?.alt
+            manual.vAcc = compass?.vAcc
+        }
+        return manual
+    }
+
     /// 녹화 화면 상단에 보여 줄 한 줄 요약
     var shortStatus: String {
         if isDenied { return "위치 권한 꺼짐" }
