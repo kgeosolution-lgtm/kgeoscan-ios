@@ -100,6 +100,16 @@ struct ScanMeta: Codable, Hashable {
     var exposureMode: String?
     /// 녹화 중 ARKit 메시 재구성(화면 표시용)이 켜져 있었는지
     var meshOverlay: Bool?
+    /// 위치 입력 방식: gps(녹화 시작 순간 GPS) | map(지도에서 찍은 점)
+    var locationSource: String?
+    /// 지도에서 찍은 위치 (locationSource == map). fix 에는 여기에 나침반 방위·GPS 고도를 보태 저장한다
+    var manualFix: GeoFix?
+    /// 녹화 중 촬영 통계 (거리·속도·신뢰도·선명도)
+    var captureStats: CaptureStats?
+    /// 녹화 폴더 전체 바이트 (녹화 종료 시 계산)
+    var folderBytes: Int64?
+    /// 대표 이미지 파일 이름 (녹화 중 가장 선명한 프레임, 폴더 안)
+    var thumbFile: String?
     var fix: GeoFix?
     var upload: UploadRecord?
     /// 이 녹화의 업로드 식별자. 앱이 한 번 만들어 재시도해도 같은 값을 upload 필드 client_id 로 보낸다

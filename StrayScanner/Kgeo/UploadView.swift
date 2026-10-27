@@ -159,7 +159,8 @@ final class UploadViewModel: ObservableObject {
             return
         }
         let background = UserDefaults.standard.bool(forKey: KgeoDefaults.backgroundUploadKey)
-        transport = background ? "background" : "foreground"
+        let wifiOnly = UserDefaults.standard.bool(forKey: KgeoDefaults.wifiOnlyKey)
+        transport = background ? "background" : (wifiOnly ? "foreground (Wi-Fi 전용)" : "foreground")
 
         // 이미 job_id 를 받은 스캔은 다시 올리지 않고 상태만 조회한다
         if !forceReupload, let previous = meta.upload, previous.status != "failed",
@@ -257,6 +258,7 @@ final class UploadViewModel: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let (code, data) = try await UploadClient.shared.upload(
                 request: request, bodyFile: bodyFile, taskDescription: directory.path, background: background,
+                wifiOnly: wifiOnly,
                 log: { [weak self] line in
                     Task { @MainActor in self?.appendLog(line) }
                 },
@@ -265,7 +267,7 @@ final class UploadViewModel: ObservableObject {
                         guard let self = self else { return }
                         if sent < self.bytesSent {
                             self.restarts += 1
-                            if self.transport == "background" {
+                            if self.transport.hasPrefix("background") {
                                 // iOS 가 응답을 못 받고 본문을 처음부터 다시 보내려는 것 — 서버 중복을 막기 위해 끊는다
                                 self.appendLog("iOS 가 본문을 처음부터 다시 보내려 합니다 — 중복 업로드를 막기 위해 전송을 멈춥니다", persist: true)
                                 UploadClient.shared.cancelAll()
@@ -408,8 +410,8 @@ struct UploadView: View {
                     Text("\(megabytes(vm.bytesSent)) / \(megabytes(vm.bytesTotal)) MB · \(vm.transport)")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Text(vm.transport == "background"
-                         ? "iOS 가 대신 보냅니다. 응답을 못 받으면 처음부터 다시 보낼 수 있습니다."
+                    Text(vm.transport.hasPrefix("background")
+                         ? "iOS 가 대신 보냅니다. 응답을 못 받고 다시 보내려 하면 앱이 전송을 멈춥니다."
                          : "업로드 중에는 앱을 열어 두세요 (화면 자동 잠금은 꺼 두었습니다).")
                         .font(.caption)
                         .foregroundColor(.secondary)

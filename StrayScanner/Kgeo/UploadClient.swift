@@ -78,15 +78,19 @@ final class UploadClient: NSObject, URLSessionDataDelegate {
     private var lastSent: [ObjectIdentifier: Int64] = [:]
 
     /// 앱을 열어 둔 채 전송. 연결이 끊기면 그대로 오류가 올라온다 (POST 는 시스템이 재시도하지 않는다).
-    private lazy var foregroundSession: URLSession = {
+    private lazy var foregroundSession: URLSession = makeForegroundSession(allowsCellular: true)
+    /// Wi-Fi 에서만: 셀룰러면 Wi-Fi 가 잡힐 때까지 기다린다 (taskIsWaitingForConnectivity 로 로그에 남는다)
+    private lazy var foregroundWifiOnlySession: URLSession = makeForegroundSession(allowsCellular: false)
+
+    private func makeForegroundSession(allowsCellular: Bool) -> URLSession {
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = true
         config.timeoutIntervalForRequest = 120
         config.timeoutIntervalForResource = 60 * 60
-        config.allowsCellularAccess = true
+        config.allowsCellularAccess = allowsCellular
         config.urlCache = nil
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+    }
 
     /// iOS 가 대신 전송 (화면을 꺼도 계속). 실패하면 시스템이 처음부터 다시 보낼 수 있다.
     private lazy var backgroundSession: URLSession = {
@@ -110,18 +114,17 @@ final class UploadClient: NSObject, URLSessionDataDelegate {
 
     /// 모든 진행 중 전송을 취소한다.
     func cancelAll() {
-        foregroundSession.getAllTasks { tasks in
-            tasks.forEach { $0.cancel() }
-        }
-        backgroundSession.getAllTasks { tasks in
-            tasks.forEach { $0.cancel() }
+        for session in [foregroundSession, foregroundWifiOnlySession, backgroundSession] {
+            session.getAllTasks { tasks in
+                tasks.forEach { $0.cancel() }
+            }
         }
     }
 
     /// bodyFile 을 그대로 POST 한다. 반환: (HTTP 상태 코드, 응답 본문)
-    func upload(request: URLRequest, bodyFile: URL, taskDescription: String, background: Bool,
+    func upload(request: URLRequest, bodyFile: URL, taskDescription: String, background: Bool, wifiOnly: Bool = false,
                 log: @escaping LogHandler, progress: @escaping ProgressHandler) async throws -> (Int, Data) {
-        let session = background ? backgroundSession : foregroundSession
+        let session = background ? backgroundSession : (wifiOnly ? foregroundWifiOnlySession : foregroundSession)
         let task = session.uploadTask(with: request, fromFile: bodyFile)
         task.taskDescription = taskDescription
         let key = ObjectIdentifier(task)

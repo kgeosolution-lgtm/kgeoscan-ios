@@ -2,7 +2,8 @@
 //  ScanSetupView.swift
 //  kgeoScan
 //
-//  녹화 전 입력 화면: 제목, 비고, 모드, 서버 주소, 현재 위치·방위 확인. (Stray Scanner 포크에 추가된 파일)
+//  녹화 전 입력 화면: 제목, 비고, 모드, 위치(현재 위치 또는 지도에서 선택). (Stray Scanner 포크에 추가된 파일)
+//  서버 주소·업로드·노출 설정은 설정 화면(SettingsView)에 있다.
 //
 
 import SwiftUI
@@ -11,11 +12,13 @@ import CoreLocation
 struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.serverBaseKey) private var serverBase: String = KgeoDefaults.serverBase
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
-    @AppStorage(KgeoDefaults.backgroundUploadKey) private var backgroundUpload: Bool = false
+    @AppStorage(KgeoDefaults.locationSourceKey) private var locationSourceRaw: String = "gps"
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
+    @State private var pickedCoordinate: CLLocationCoordinate2D?
+    @State private var manualHeadingText: String = ""
     @ObservedObject private var location = LocationService.shared
 
     /// 입력이 끝나면 호출된다. 호출한 쪽이 녹화 화면으로 넘긴다.
@@ -33,42 +36,25 @@ struct ScanSetupView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                Text("모드는 meta.json 과 업로드 필드 scan_type(home/survey) 으로 서버에 전달됩니다.")
+                Text(modeRaw == ScanMode.survey.rawValue
+                     ? "현장조사: 물체에서 40~80 cm 떨어져 천천히 한 바퀴(20~30초). 반투명·광택 표면은 LiDAR 에 안 잡힙니다."
+                     : "홈스캔: 벽과 바닥을 0.3~3 m 거리에서 천천히 훑습니다. 방 단위로 나눠 찍는 것이 좋습니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
-            Section("촬영") {
-                Picker("노출", selection: $exposureRaw) {
-                    ForEach(ExposureController.Mode.allCases) { mode in
-                        Text(mode.label).tag(mode.rawValue)
-                    }
+            Section("위치 · 방위") {
+                Picker("위치 입력", selection: $locationSourceRaw) {
+                    Text("현재 위치 (GPS)").tag("gps")
+                    Text("지도에서 선택").tag("map")
                 }
                 .pickerStyle(.segmented)
-                Text("빠른 셔터는 움직일 때 생기는 번짐(모션블러)을 줄여 사진 기반 복원에 쓸 프레임을 선명하게 합니다. 어두운 곳에서는 노이즈가 늘어나니 밝은 곳에서 쓰세요.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("녹화 화면에는 실제 카메라 화면 위에 스캔된 면이 파란 반투명으로 덮입니다. 화면을 탭하거나 '메시' 버튼으로 끄고 켤 수 있습니다. 반투명·광택 표면은 LiDAR 깊이가 비어 메시에 안 나옵니다.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Section("서버") {
-                TextField("업로드 주소", text: $serverBase)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Text("upload.py / status.py 가 있는 폴더 주소")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Toggle("백그라운드로 전송 (실험)", isOn: $backgroundUpload)
-                Text("꺼짐(기본): 앱을 열어 둔 채 보내고, 끊기면 바로 오류를 보여 줍니다. 켜짐: iOS 가 대신 보내지만 응답을 못 받으면 처음부터 다시 보낼 수 있습니다.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            Section("위치 · 방위 (녹화 버튼을 누르는 순간 기록)") {
-                locationRows
+                if locationSourceRaw == "map" {
+                    mapRows
+                } else {
+                    gpsRows
+                }
+                headingRow
             }
 
             if let message = validationMessage {
@@ -86,6 +72,9 @@ struct ScanSetupView: View {
                         Spacer()
                     }
                 }
+                Text("서버: \(serverBase) · 노출: \(ExposureController.currentMode.label) — 설정에서 변경")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
         }
         .navigationTitle("새 스캔")
@@ -95,10 +84,12 @@ struct ScanSetupView: View {
         }
     }
 
+    // MARK: - 위치 입력
+
     @ViewBuilder
-    private var locationRows: some View {
+    private var gpsRows: some View {
         if location.isDenied {
-            Text("위치 권한이 꺼져 있습니다. 설정 > kgeoScan > 위치 에서 허용해 주세요. 위치가 없으면 서버가 스캔을 지도에 놓지 못합니다.")
+            Text("위치 권한이 꺼져 있습니다. 설정 > kgeoScan > 위치 에서 허용하거나 '지도에서 선택'을 쓰세요.")
                 .foregroundColor(.red)
             Button("설정 열기") {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
@@ -111,28 +102,74 @@ struct ScanSetupView: View {
                 LabeledContent("경도", value: String(format: "%.6f", loc.coordinate.longitude))
                 LabeledContent("고도", value: loc.verticalAccuracy >= 0
                                ? String(format: "%.1f m (±%.0f)", loc.altitude, loc.verticalAccuracy) : "-")
-                LabeledContent("수평 정확도", value: loc.horizontalAccuracy >= 0
-                               ? String(format: "±%.0f m", loc.horizontalAccuracy) : "-")
+                HStack {
+                    Text("수평 정확도")
+                    Spacer()
+                    Text(loc.horizontalAccuracy >= 0 ? String(format: "±%.0f m", loc.horizontalAccuracy) : "-")
+                        .foregroundColor(loc.horizontalAccuracy > 30 ? .orange : .secondary)
+                }
+                if loc.horizontalAccuracy > 30 {
+                    Text("정확도가 낮습니다. 창가·실외에서 잠시 기다리거나 '지도에서 선택'을 쓰세요.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
             } else {
                 HStack {
                     ProgressView()
                     Text("GPS 수신 대기 중…").foregroundColor(.secondary)
                 }
             }
-            if let h = location.heading {
-                LabeledContent("방위", value: h.trueHeading >= 0
-                               ? String(format: "%.0f° (진북)", h.trueHeading)
-                               : String(format: "%.0f° (자북)", h.magneticHeading))
-            } else {
-                Text("나침반 대기 중…").foregroundColor(.secondary)
+            Button {
+                location.restart()
+            } label: {
+                Label("다시 잡기", systemImage: "location.circle")
             }
             if let error = location.lastError {
                 Text(error).font(.caption).foregroundColor(.orange)
             }
-            Text("녹화 버튼을 누르는 순간 카메라가 향한 방향이 스캔의 기준 방위(heading)가 되고, 그 자리가 원점이 됩니다. 정확도가 나쁘면 잠시 기다렸다가 시작하세요.")
+            Text("녹화 버튼을 누르는 순간의 GPS 가 스캔 원점이 됩니다.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
+    }
+
+    @ViewBuilder
+    private var mapRows: some View {
+        MapPickerView(coordinate: $pickedCoordinate, initialCenter: location.location?.coordinate)
+            .frame(height: 280)
+            .cornerRadius(8)
+            .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4))
+        if let c = pickedCoordinate {
+            LabeledContent("선택한 위치", value: String(format: "%.6f, %.6f", c.latitude, c.longitude))
+        } else {
+            Text("지도를 탭해 스캔 위치를 찍으세요. 핀은 끌어서 옮길 수 있습니다.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        Button {
+            pickedCoordinate = location.location?.coordinate
+        } label: {
+            Label("현재 위치로 핀 옮기기", systemImage: "location.fill")
+        }
+        .disabled(location.location == nil)
+    }
+
+    @ViewBuilder
+    private var headingRow: some View {
+        if let h = location.heading {
+            LabeledContent("나침반 방위", value: h.trueHeading >= 0
+                           ? String(format: "%.0f° (진북)", h.trueHeading)
+                           : String(format: "%.0f° (자북)", h.magneticHeading))
+        } else {
+            Text("나침반 대기 중…").foregroundColor(.secondary)
+        }
+        if locationSourceRaw == "map" {
+            TextField("방위 직접 입력 (도, 비우면 녹화 시작 때 나침반)", text: $manualHeadingText)
+                .keyboardType(.decimalPad)
+        }
+        Text("녹화 버튼을 누르는 순간 카메라가 향한 방향이 스캔의 기준 방위(heading)가 됩니다.")
+            .font(.caption)
+            .foregroundColor(.secondary)
     }
 
     private func startTapped() {
@@ -142,15 +179,31 @@ struct ScanSetupView: View {
             return
         }
         guard let endpoints = ServerEndpoints(string: serverBase) else {
-            validationMessage = "서버 주소가 올바르지 않습니다. https://… 형식으로 적어 주세요."
+            validationMessage = "서버 주소가 올바르지 않습니다. 설정에서 https://… 형식으로 적어 주세요."
             return
         }
-        validationMessage = nil
-        serverBase = endpoints.normalized
-        let meta = ScanMeta(title: String(trimmedTitle.prefix(100)),
+        var meta = ScanMeta(title: String(trimmedTitle.prefix(100)),
                             note: String(note.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500)),
                             mode: ScanMode(rawValue: modeRaw) ?? .home,
                             serverBase: endpoints.normalized)
+        meta.locationSource = locationSourceRaw
+        if locationSourceRaw == "map" {
+            guard let c = pickedCoordinate else {
+                validationMessage = "지도에서 스캔 위치를 찍어 주세요."
+                return
+            }
+            var manual = GeoFix(lat: c.latitude, lon: c.longitude, fixTime: Date())
+            let headingText = manualHeadingText.trimmingCharacters(in: .whitespaces)
+            if !headingText.isEmpty {
+                guard let heading = Double(headingText), heading >= 0, heading < 360 else {
+                    validationMessage = "방위는 0~359 사이의 숫자로 적어 주세요."
+                    return
+                }
+                manual.trueHeading = heading
+            }
+            meta.manualFix = manual
+        }
+        validationMessage = nil
         onStart(meta)
     }
 

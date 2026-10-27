@@ -10,10 +10,10 @@
 //    sceneReconstruction 메시(ARMeshAnchor)를 반투명 면으로 덮어 "어디를 찍었는지" 보여 준다 (탭하면 끄고 켬).
 //  - 녹화 시작 시 ARKit 트래킹을 리셋해 월드 원점을 녹화 시작 지점으로 맞춘다
 //    (서버는 원점을 lon/lat/elev 에 놓고, -z(정면)를 heading 방위로 돌린다). 메시도 이때 비워진다.
-//  - 트래킹이 normal 이 된 첫 프레임에서 GPS·나침반 스냅샷을 찍는다.
-//  - 촬영 안내: 트래킹 상태, LiDAR 거리(0.3~3 m), 움직임 속도 경고, 모드별 힌트.
+//  - 트래킹이 normal 이 된 첫 프레임에서 GPS·나침반 스냅샷(또는 지도에서 찍은 위치 + 나침반)을 기록한다.
+//  - 촬영 안내: 트래킹 상태, LiDAR 거리, 깊이 신뢰도, 움직임 속도, 흐림 경고, 모드별 힌트, 프레임 수·예상 용량.
+//  - 녹화 중 가장 선명한 프레임을 thumb.jpg 로 저장, 종료 뒤 촬영 통계 요약과 '다시 찍기' 제안.
 //  - 노출 옵션(빠른 셔터)으로 모션블러를 줄인다.
-//  - 녹화가 끝나면 meta.json 을 쓰고 onFinished(녹화 폴더) 를 부른다.
 //  녹화 데이터(DatasetEncoder 이하)는 원본 그대로다.
 //
 
@@ -24,6 +24,7 @@ import ARKit
 import SceneKit
 import CoreData
 import CoreMotion
+import CoreImage
 
 let FpsDividers: [Int] = [1, 2, 4, 12, 60]
 let AvailableFpsSettings: [Int] = FpsDividers.map { Int(60 / $0) }
@@ -59,7 +60,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     var dismissFunction: Optional<() -> Void> = Optional.none
 
     // MARK: kgeoScan
-    /// 설정 화면에서 넘어온 제목·모드·서버 주소. 녹화가 끝나면 meta.json 으로 저장된다.
+    /// 설정 화면에서 넘어온 제목·모드·서버 주소·위치 입력 방식. 녹화가 끝나면 meta.json 으로 저장된다.
     var scanMeta: ScanMeta?
     /// 녹화가 정상적으로 끝났을 때 (녹화 폴더 절대 경로) 로 불린다. 없으면 dismissFunction 을 쓴다.
     var onFinished: ((URL) -> Void)?
@@ -71,6 +72,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private let geoLabel = PaddedLabel()
     private let trackingLabel = PaddedLabel()
     private let guideLabel = PaddedLabel()
+    private let statsLabel = PaddedLabel()
     private let overlayButton = UIButton(type: .system)
     private var geoLabelTimer: Timer?
     private let sceneView = ARSCNView(frame: .zero)
@@ -79,6 +81,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private let guide = CaptureGuide()
     private let exposure = ExposureController()
     private var frameCounter = 0
+    private let thumbQueue = DispatchQueue(label: "kgeo.thumb", qos: .utility)
+    private let ciContext = CIContext()
+    private var bestThumbSharpness: Float = -1
+    private var lastThumbCheck: TimeInterval = 0
+    private var thumbWritten = false
 
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
@@ -95,6 +102,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guard let appDelegate = UIApplication.shared.delegate as? AppDelegate else { return }
         self.dataContext = appDelegate.persistentContainer.newBackgroundContext()
 
+        guide.thresholds = (scanMeta?.mode ?? .home) == .survey ? CaptureGuide.survey : CaptureGuide.home
         setupSceneView()
         setupOverlayViews()
         setViewProperties()
@@ -159,7 +167,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func setupOverlayViews() {
-        for label in [geoLabel, trackingLabel, guideLabel] {
+        for label in [geoLabel, trackingLabel, guideLabel, statsLabel] {
             label.translatesAutoresizingMaskIntoConstraints = false
             label.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
             label.textColor = .white
@@ -172,6 +180,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         geoLabel.text = "위치 확인 중…"
         trackingLabel.text = "트래킹 준비"
+        statsLabel.text = "0 프레임 · ≈0 MB"
+        statsLabel.isHidden = true
         guideLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
         guideLabel.numberOfLines = 2
         guideLabel.isHidden = true
@@ -198,6 +208,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             guideLabel.widthAnchor.constraint(lessThanOrEqualTo: safe.widthAnchor, constant: -24),
             overlayButton.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
             overlayButton.bottomAnchor.constraint(equalTo: guideLabel.topAnchor, constant: -8),
+            statsLabel.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            statsLabel.bottomAnchor.constraint(equalTo: guideLabel.topAnchor, constant: -8),
         ])
         geoLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
@@ -304,20 +316,40 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         trackingWaitStarted = Date()
         geoFix = nil
         captureStartedAt = nil
+        bestThumbSharpness = -1
+        lastThumbCheck = 0
+        thumbWritten = false
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             self.updateTime()
         }
         datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting])
+        statsLabel.isHidden = false
     }
 
-    /// 트래킹이 잡힌 첫 프레임: 이 순간의 GPS·방위가 스캔의 원점·기준 방위가 된다.
+    /// 트래킹이 잡힌 첫 프레임: 이 순간의 GPS·방위(또는 지도에서 찍은 위치 + 나침반)가 스캔의 원점·기준 방위가 된다.
     private func beginCapture() {
         awaitingTracking = false
-        geoFix = LocationService.shared.snapshot()
+        let compass = LocationService.shared.snapshot()
+        if scanMeta?.locationSource == "map", var manual = scanMeta?.manualFix {
+            if manual.trueHeading == nil {
+                manual.trueHeading = compass?.trueHeading
+                manual.magneticHeading = compass?.magneticHeading
+                manual.headingAccuracy = compass?.headingAccuracy
+                manual.headingTime = compass?.headingTime
+            }
+            if manual.alt == nil {
+                manual.alt = compass?.alt
+                manual.vAcc = compass?.vAcc
+            }
+            geoFix = manual
+        } else {
+            geoFix = compass
+        }
         startedRecording = Date()
         captureStartedAt = Date()
+        guide.resetStats()
         startRawIMU()
     }
 
@@ -330,6 +362,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         awaitingTracking = false
         updateLabelTimer?.invalidate()
         updateLabelTimer = nil
+        statsLabel.isHidden = true
         // Stop IMU updates
         stopRawIMU()
         guard let encoder = datasetEncoder else {
@@ -347,15 +380,32 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         switch encoder.status {
             case .allGood:
-                saveRecording(started, encoder)
-                writeMeta(started: started, encoder: encoder, directory: directory)
-                if let onFinished = onFinished {
-                    onFinished(directory)
+                let stats = guide.summary()
+                if stats.isPoor {
+                    showSummary(stats: stats) { [weak self] keep in
+                        guard let self = self else { return }
+                        if keep {
+                            self.finishRecording(started: started, encoder: encoder, directory: directory, stats: stats)
+                        } else {
+                            try? FileManager.default.removeItem(at: directory)
+                            self.datasetEncoder = nil
+                        }
+                    }
                 } else {
-                    self.dismissFunction?()
+                    finishRecording(started: started, encoder: encoder, directory: directory, stats: stats)
                 }
             case .videoEncodingError, .directoryCreationError:
                 showError(message: "영상 인코딩 중 오류가 났습니다. 다시 녹화해 주세요.")
+        }
+    }
+
+    private func finishRecording(started: Date, encoder: DatasetEncoder, directory: URL, stats: CaptureStats) {
+        saveRecording(started, encoder)
+        writeMeta(started: started, encoder: encoder, directory: directory, stats: stats)
+        if let onFinished = onFinished {
+            onFinished(directory)
+        } else {
+            self.dismissFunction?()
         }
     }
 
@@ -378,7 +428,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
     }
 
-    private func writeMeta(started: Date, encoder: DatasetEncoder, directory: URL) {
+    private func writeMeta(started: Date, encoder: DatasetEncoder, directory: URL, stats: CaptureStats) {
         var meta = scanMeta ?? ScanMeta(title: "Recording", note: "", mode: .home, serverBase: KgeoDefaults.storedServerBase)
         meta.createdAt = started
         meta.durationSeconds = Date().timeIntervalSince(started)
@@ -389,11 +439,41 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         meta.fix = geoFix
         meta.exposureMode = ExposureController.currentMode.rawValue
         meta.meshOverlay = meshSupported
+        meta.captureStats = stats
+        meta.folderBytes = RecordSessionViewController.folderSize(directory)
+        if thumbWritten {
+            meta.thumbFile = "thumb.jpg"
+        }
         do {
             try meta.save(to: directory)
         } catch {
             print("meta.json 저장 실패: \(error.localizedDescription)")
         }
+    }
+
+    /// 폴더 전체 바이트 (meta.json 기록용)
+    static func folderSize(_ directory: URL) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.fileSizeKey],
+                                                              options: [.skipsHiddenFiles]) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                total += Int64(size)
+            }
+        }
+        return total
+    }
+
+    private func showSummary(stats: CaptureStats, completion: @escaping (Bool) -> Void) {
+        var lines = stats.warnings
+        if let d = stats.avgDistance {
+            lines.append(String(format: "평균 거리 %.2f m, 최대 속도 %.1f m/s", d, stats.maxSpeed))
+        }
+        let message = lines.joined(separator: "\n") + "\n\n이대로 올릴 수도 있지만 다시 찍으면 결과가 좋아집니다."
+        let controller = UIAlertController(title: "촬영 품질 확인", message: message, preferredStyle: .alert)
+        controller.addAction(UIAlertAction(title: "다시 찍기 (삭제)", style: .destructive, handler: { _ in completion(false) }))
+        controller.addAction(UIAlertAction(title: "이대로 진행", style: .default, handler: { _ in completion(true) }))
+        self.present(controller, animated: true, completion: nil)
     }
 
     private func showError(message: String, popOnDismiss: Bool = true) {
@@ -413,6 +493,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let hours: Int = Int(floor(seconds / 3600))
         let roundSeconds: Int = Int(floor(seconds.truncatingRemainder(dividingBy: 60)))
         self.timeLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, roundSeconds)
+        if let encoder = datasetEncoder {
+            let frames = encoder.savedFrameCount
+            let megabytes = Double(Int64(frames) * KgeoDefaults.bytesPerFrameEstimate) / 1_048_576
+            statsLabel.text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
+        }
     }
 
     // MARK: - 메시 오버레이 켜고 끄기
@@ -442,8 +527,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         frameCounter += 1
+        let capturing = startedRecording != nil && !awaitingTracking
         if frameCounter % 6 == 0 {
-            updateGuidance(frame: frame)
+            updateGuidance(frame: frame, capturing: capturing)
         }
         guard startedRecording != nil, let encoder = datasetEncoder else { return }
         if awaitingTracking {
@@ -457,15 +543,42 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             beginCapture()
         }
         encoder.add(frame: frame)
+        considerThumbnail(frame: frame, directory: encoder.directory.absoluteURL.standardizedFileURL)
+    }
+
+    /// 녹화 시작 20초 동안 1초마다 선명도를 보고, 가장 선명한 프레임을 thumb.jpg 로 남긴다
+    private func considerThumbnail(frame: ARFrame, directory: URL) {
+        guard let began = captureStartedAt, Date().timeIntervalSince(began) < 20,
+              frame.timestamp - lastThumbCheck >= 1.0 else { return }
+        lastThumbCheck = frame.timestamp
+        let sharpness = guide.lastSharpness
+        guard sharpness > bestThumbSharpness else { return }
+        bestThumbSharpness = sharpness
+        let pixelBuffer = frame.capturedImage
+        let context = ciContext
+        thumbQueue.async { [weak self] in
+            let image = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
+            let scale = 480 / max(image.extent.width, 1)
+            let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            let options = [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.8]
+            guard let data = context.jpegRepresentation(of: scaled, colorSpace: CGColorSpaceCreateDeviceRGB(), options: options) else { return }
+            let url = directory.appendingPathComponent("thumb.jpg", isDirectory: false)
+            do {
+                try data.write(to: url, options: .atomic)
+                DispatchQueue.main.async { self?.thumbWritten = true }
+            } catch {
+                print("thumb.jpg 저장 실패: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - 촬영 안내
 
-    private func updateGuidance(frame: ARFrame) {
-        let guidance = guide.evaluate(frame: frame)
+    private func updateGuidance(frame: ARFrame, capturing: Bool) {
+        let guidance = guide.evaluate(frame: frame, recording: capturing)
         var trackingText = guidance.trackingText
         if let depth = guidance.centerDepth {
-            trackingText += String(format: " · %.1f m", depth)
+            trackingText += String(format: " · %.2f m", depth)
         }
         trackingLabel.text = trackingText
         trackingLabel.backgroundColor = guidance.trackingOK
@@ -498,14 +611,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private func modeHint() -> String {
         switch scanMeta?.mode ?? .home {
         case .survey:
-            return "물체를 화면 중앙에 두고 0.3~3 m 거리에서 천천히 한 바퀴 돌며 찍으세요"
+            return "물체에서 40~80 cm 떨어져 천천히 한 바퀴 (20~30초). 중앙에 두고 찍으세요"
         case .home:
             return "벽과 바닥을 0.3~3 m 거리에서 천천히 훑으세요. 같은 곳을 두 번 지나면 더 좋습니다"
         }
     }
 
     private func updateGeoLabel() {
-        geoLabel.text = LocationService.shared.shortStatus
+        if scanMeta?.locationSource == "map", let manual = scanMeta?.manualFix {
+            geoLabel.text = String(format: "지도 위치 %.5f, %.5f", manual.lat, manual.lon)
+        } else {
+            geoLabel.text = LocationService.shared.shortStatus
+        }
     }
 
     private func updateFpsSetting() {

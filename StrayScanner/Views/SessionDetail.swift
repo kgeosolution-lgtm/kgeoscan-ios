@@ -192,10 +192,18 @@ struct SessionDetailView: View {
                     detailRow("비고", value: meta.note)
                 }
                 if let fix = meta.fix {
-                    detailRow("위치", value: String(format: "%.6f, %.6f (±%.0f m)", fix.lat, fix.lon, fix.hAcc ?? -1))
+                    let source = meta.locationSource == "map" ? "지도 선택" : "GPS"
+                    let accuracy = fix.hAcc.map { String(format: " (±%.0f m)", $0) } ?? ""
+                    detailRow("위치", value: String(format: "%.6f, %.6f", fix.lat, fix.lon) + accuracy + " · " + source)
                     detailRow("방위", value: fix.headingForUpload.map { String(format: "%.0f°", $0) } ?? "없음")
                 } else {
                     detailRow("위치", value: "기록 없음")
+                }
+                if let bytes = meta.folderBytes {
+                    detailRow("용량", value: SessionRow.formatBytes(bytes))
+                }
+                if let stats = meta.captureStats {
+                    detailRow("촬영", value: captureSummary(stats))
                 }
                 if let upload = meta.upload {
                     detailRow("업로드", value: uploadSummary(upload))
@@ -231,6 +239,15 @@ struct SessionDetailView: View {
             text += " · \(frames) 프레임"
         }
         return text
+    }
+
+    private func captureSummary(_ stats: CaptureStats) -> String {
+        var parts: [String] = []
+        if let d = stats.avgDistance { parts.append(String(format: "평균 거리 %.2f m", d)) }
+        parts.append(String(format: "최대 속도 %.1f m/s", stats.maxSpeed))
+        if let c = stats.highConfidenceRatio { parts.append(String(format: "깊이 신뢰 %.0f%%", c * 100)) }
+        if !stats.warnings.isEmpty { parts.append("경고 \(stats.warnings.count)건") }
+        return parts.joined(separator: " · ")
     }
 
     private func uploadSummary(_ upload: UploadRecord) -> String {

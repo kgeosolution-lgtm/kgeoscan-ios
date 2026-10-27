@@ -5,7 +5,7 @@
 //  Created by Kenneth Blomqvist on 11/15/20.
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
-//  kgeoScan 변경: NavigationStack 으로 '새 스캔 → 설정 → 녹화 → 업로드' 흐름을 잇는다.
+//  kgeoScan 변경: NavigationStack 으로 '새 스캔 → 설정 → 녹화 → 업로드' 흐름을 잇고, 설정 화면·스와이프 삭제를 더했다.
 //
 
 import SwiftUI
@@ -16,6 +16,7 @@ enum ScanRoute: Hashable {
     case setup
     case record(ScanMeta)
     case upload(URL)
+    case settings
 }
 
 class SessionListViewModel: ObservableObject {
@@ -46,6 +47,22 @@ class SessionListViewModel: ObservableObject {
         }
     }
 
+    /// 스와이프 삭제: 녹화 파일과 항목을 함께 지운다
+    func delete(at offsets: IndexSet) {
+        for index in offsets {
+            guard index < sessions.count else { continue }
+            let recording = sessions[index]
+            recording.deleteFiles()
+            dataContext?.delete(recording)
+        }
+        do {
+            try dataContext?.save()
+        } catch let error as NSError {
+            print("Could not delete recording. \(error), \(error.userInfo)")
+        }
+        fetchSessions()
+    }
+
     @objc func sessionsChanged() {
         fetchSessions()
     }
@@ -55,6 +72,7 @@ struct SessionList: View {
     @ObservedObject var viewModel = SessionListViewModel()
     @State private var showingInfo = false
     @State private var path: [ScanRoute] = []
+    @AppStorage(KgeoDefaults.autoUploadKey) private var autoUpload: Bool = true
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -66,6 +84,16 @@ struct SessionList: View {
                         .fontWeight(.bold)
                         .padding([.top, .leading], 15.0)
                     Spacer()
+                    Button(action: {
+                        path.append(.settings)
+                    }, label: {
+                        Image(systemName: "gearshape")
+                            .resizable()
+                            .frame(width: 25, height: 25, alignment: .center)
+                            .padding(.top, 17)
+                            .padding(.trailing, 16)
+                            .foregroundColor(Color("TextColor"))
+                    })
                     Button(action: {
                         showingInfo.toggle()
                     }, label: {
@@ -86,6 +114,9 @@ struct SessionList: View {
                             NavigationLink(destination: SessionDetailView(recording: recording)) {
                                 SessionRow(session: recording)
                             }
+                        }
+                        .onDelete { offsets in
+                            viewModel.delete(at: offsets)
                         }
                     }
                     .scrollContentBackground(.hidden)
@@ -125,11 +156,17 @@ struct SessionList: View {
                     }
                 case .record(let meta):
                     RecordScreen(meta: meta) { directory in
-                        // 녹화 화면을 빼고 업로드 화면으로 바꿔 끼운다
-                        path = [.upload(directory)]
+                        // 녹화 화면을 빼고 업로드 화면으로 바꿔 끼운다 (자동 업로드가 꺼져 있으면 목록으로)
+                        if autoUpload {
+                            path = [.upload(directory)]
+                        } else {
+                            path = []
+                        }
                     }
                 case .upload(let directory):
                     UploadView(directory: directory)
+                case .settings:
+                    SettingsView()
                 }
             }
             .onAppear {

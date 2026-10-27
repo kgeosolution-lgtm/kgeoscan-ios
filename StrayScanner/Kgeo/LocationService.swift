@@ -57,6 +57,16 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         manager.stopUpdatingHeading()
     }
 
+    /// 위치를 버리고 새로 잡는다 ("다시 잡기")
+    func restart() {
+        manager.stopUpdatingLocation()
+        manager.stopUpdatingHeading()
+        location = nil
+        heading = nil
+        lastError = nil
+        start()
+    }
+
     private func beginUpdates() {
         manager.startUpdatingLocation()
         if CLLocationManager.headingAvailable() {
