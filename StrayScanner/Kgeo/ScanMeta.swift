@@ -59,6 +59,22 @@ struct UploadRecord: Codable, Hashable {
     var resultUrl: String?
 }
 
+/// 전송 시도 1회의 기록 (원인 추적용). meta.json 의 last_attempt
+struct UploadAttempt: Codable, Hashable {
+    var startedAt: Date
+    var clientId: String
+    /// foreground | background
+    var transport: String
+    var bodyBytes: Int64
+    var finishedAt: Date?
+    var httpStatus: Int?
+    /// 보낸 바이트가 줄어든(처음부터 다시 보낸) 횟수
+    var restarts: Int?
+    var jobId: String?
+    var duplicate: Bool?
+    var error: String?
+}
+
 struct ScanMeta: Codable, Hashable {
     static let fileName = "meta.json"
 
@@ -82,6 +98,12 @@ struct ScanMeta: Codable, Hashable {
     var trackingResetAtRecordStart = true
     var fix: GeoFix?
     var upload: UploadRecord?
+    /// 이 녹화의 업로드 식별자. 앱이 한 번 만들어 재시도해도 같은 값을 upload 필드 client_id 로 보낸다
+    var clientId: String?
+    var attemptCount: Int?
+    var lastAttempt: UploadAttempt?
+    /// 업로드 화면 로그의 마지막 부분 (전체는 녹화 폴더의 upload.log)
+    var uploadLog: [String]?
 
     init(title: String, note: String, mode: ScanMode, serverBase: String) {
         self.title = title

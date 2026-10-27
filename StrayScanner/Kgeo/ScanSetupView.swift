@@ -11,6 +11,7 @@ import CoreLocation
 struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.serverBaseKey) private var serverBase: String = KgeoDefaults.serverBase
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
+    @AppStorage(KgeoDefaults.backgroundUploadKey) private var backgroundUpload: Bool = false
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
@@ -42,6 +43,10 @@ struct ScanSetupView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                 Text("upload.py / status.py 가 있는 폴더 주소")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Toggle("백그라운드로 전송 (실험)", isOn: $backgroundUpload)
+                Text("꺼짐(기본): 앱을 열어 둔 채 보내고, 끊기면 바로 오류를 보여 줍니다. 켜짐: iOS 가 대신 보내지만 응답을 못 받으면 처음부터 다시 보낼 수 있습니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

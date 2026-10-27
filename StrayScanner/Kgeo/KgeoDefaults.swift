@@ -17,6 +17,11 @@ enum KgeoDefaults {
     /// UserDefaults 키
     static let serverBaseKey = "kgeo.serverBase"
     static let modeKey = "kgeo.mode"
+    /// true 면 백그라운드 URLSession 으로 전송 (실험). 기본 false = 앱을 열어 둔 채 전송
+    static let backgroundUploadKey = "kgeo.backgroundUpload"
+
+    /// 녹화 폴더에 쌓는 업로드 로그 파일
+    static let uploadLogFileName = "upload.log"
 
     /// 저장된 서버 주소 (없으면 기본값)
     static var storedServerBase: String {

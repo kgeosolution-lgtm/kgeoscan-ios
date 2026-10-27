@@ -5,9 +5,13 @@
 //  녹화 폴더 압축 → upload.py 전송(진행률) → status.py 폴링(단계 표시) → 결과 페이지 열기.
 //  (Stray Scanner 포크에 추가된 파일)
 //
+//  중복 방지: 한 녹화는 client_id 를 한 번만 만들고, job_id 를 받은 뒤에는 다시 올리지 않고 상태만 조회한다.
+//  모든 단계가 화면의 로그와 녹화 폴더의 upload.log, meta.json(last_attempt, upload_log) 에 남는다.
+//
 
 import SwiftUI
 import Combine
+import UIKit
 
 /// 상태는 모두 메인 스레드에서만 바꾼다: 바꾸는 메서드마다 @MainActor 를 붙였다
 /// (클래스 전체를 @MainActor 로 하면 init 이 격리돼 StateObject 생성과 충돌한다).
@@ -30,16 +34,30 @@ final class UploadViewModel: ObservableObject {
     @Published var status: JobStatus?
     @Published var pollError: String?
     @Published var meta: ScanMeta
+    @Published var log: [String] = []
+    /// 보낸 바이트가 줄어든(처음부터 다시 보낸) 횟수
+    @Published var restarts: Int = 0
+    @Published var transport: String = ""
 
     let directory: URL
     private var runTask: Task<Void, Never>?
     private var zipObserver: AnyCancellable?
+    private var lastStatusLine = ""
+    private let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
     init(directory: URL) {
         self.directory = directory
-        self.meta = ScanMeta.load(from: directory)
+        let loaded = ScanMeta.load(from: directory)
+        self.meta = loaded
             ?? ScanMeta(title: directory.lastPathComponent, note: "", mode: .home,
                         serverBase: KgeoDefaults.storedServerBase)
+        self.log = loaded?.uploadLog ?? []
+        self.restarts = loaded?.lastAttempt?.restarts ?? 0
+        self.transport = loaded?.lastAttempt?.transport ?? ""
     }
 
     var isRunning: Bool { errorMessage == nil && stage != .idle && stage != .done }
@@ -64,11 +82,49 @@ final class UploadViewModel: ObservableObject {
         return URL(string: thumb, relativeTo: endpoints?.base)?.absoluteURL
     }
 
+    /// 복사용 전체 로그 (머리말 포함)
+    var fullLogText: String {
+        let header = [
+            "kgeoScan \(KgeoDefaults.appVersion) 업로드 로그",
+            "스캔: \(meta.title) / 폴더 \(directory.lastPathComponent) / client_id \(meta.clientId ?? "-")",
+            "서버: \(meta.serverBase)",
+            "기기: \(meta.device ?? "?") iOS \(meta.systemVersion ?? "?")",
+            "",
+        ]
+        return (header + log).joined(separator: "\n")
+    }
+
+    @MainActor
+    func appendLog(_ message: String, persist: Bool = false) {
+        let line = "\(timeFormatter.string(from: Date())) \(message)"
+        log.append(line)
+        if log.count > 400 {
+            log.removeFirst(log.count - 400)
+        }
+        appendToLogFile(line)
+        if persist {
+            meta.uploadLog = Array(log.suffix(150))
+            try? meta.save(to: directory)
+        }
+    }
+
+    private func appendToLogFile(_ line: String) {
+        let url = directory.appendingPathComponent(KgeoDefaults.uploadLogFileName, isDirectory: false)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: Data((line + "\n").utf8))
+    }
+
     @MainActor
     func start(forceReupload: Bool = false) {
         runTask?.cancel()
         errorMessage = nil
         pollError = nil
+        appendLog(forceReupload ? "사용자가 '처음부터 다시 업로드'를 눌렀습니다" : "업로드 시작")
         runTask = Task { await run(forceReupload: forceReupload) }
     }
 
@@ -80,9 +136,10 @@ final class UploadViewModel: ObservableObject {
             UploadClient.shared.cancelAll()
         }
         stage = .idle
+        appendLog("사용자가 취소했습니다", persist: true)
     }
 
-    /// 화면을 떠날 때: 폴링만 멈춘다. 진행 중인 전송은 백그라운드 세션이 이어서 끝내고 meta.json 에 기록한다.
+    /// 화면을 떠날 때: 폴링만 멈춘다. 진행 중인 전송은 세션이 이어서 끝내고 결과를 기록한다.
     @MainActor
     func stopPolling() {
         runTask?.cancel()
@@ -92,6 +149,7 @@ final class UploadViewModel: ObservableObject {
     @MainActor
     private func fail(_ message: String) {
         errorMessage = message
+        appendLog("실패: \(message)", persist: true)
     }
 
     @MainActor
@@ -100,19 +158,30 @@ final class UploadViewModel: ObservableObject {
             fail("서버 주소가 올바르지 않습니다: \(meta.serverBase)")
             return
         }
+        let background = UserDefaults.standard.bool(forKey: KgeoDefaults.backgroundUploadKey)
+        transport = background ? "background" : "foreground"
 
-        // 이미 올린 스캔이면 상태 조회만 다시 한다
+        // 이미 job_id 를 받은 스캔은 다시 올리지 않고 상태만 조회한다
         if !forceReupload, let previous = meta.upload, previous.status != "failed",
            ServerEndpoints(string: previous.server)?.normalized == endpoints.normalized {
+            appendLog("이미 올린 작업 \(previous.jobId) 의 상태를 조회합니다 (다시 올리지 않음)")
             stage = .processing
             await poll(endpoints: endpoints, jobId: previous.jobId)
             return
+        }
+
+        if meta.clientId == nil {
+            meta.clientId = UUID().uuidString.lowercased()
+        }
+        if let previous = meta.lastAttempt, previous.finishedAt == nil, previous.jobId == nil {
+            appendLog("이전 전송(\(timeFormatter.string(from: previous.startedAt)) 시작)이 끝나지 않은 채 중단됐습니다. 서버가 같은 스캔을 중복 방지하므로 다시 보냅니다.")
         }
 
         if meta.fix == nil {
             if let fix = LocationService.shared.snapshot() {
                 meta.fix = fix
                 try? meta.save(to: directory)
+                appendLog("위치 기록이 없어 현재 위치를 씁니다: \(fix.lat), \(fix.lon)")
             } else {
                 stage = .idle
                 fail("위치 정보가 없습니다. 위치 권한을 허용하고 GPS 가 잡힌 뒤 다시 시도하세요.")
@@ -122,7 +191,9 @@ final class UploadViewModel: ObservableObject {
 
         var zipURL: URL?
         var bodyURL: URL?
+        UIApplication.shared.isIdleTimerDisabled = true
         defer {
+            UIApplication.shared.isIdleTimerDisabled = false
             if let z = zipURL { try? FileManager.default.removeItem(at: z) }
             if let b = bodyURL { try? FileManager.default.removeItem(at: b) }
         }
@@ -131,6 +202,9 @@ final class UploadViewModel: ObservableObject {
             // 1. 압축
             stage = .zipping
             zipFraction = 0
+            restarts = 0
+            let zipStart = Date()
+            appendLog("압축 시작: \(directory.lastPathComponent)")
             let progress = Progress()
             zipObserver = progress.publisher(for: \.fractionCompleted)
                 .receive(on: DispatchQueue.main)
@@ -142,6 +216,7 @@ final class UploadViewModel: ObservableObject {
             zipObserver = nil
             zipFraction = 1
             zipURL = zip
+            appendLog("압축 완료: \(ZipPackager.fileSize(zip)) 바이트, \(String(format: "%.1f", Date().timeIntervalSince(zipStart)))초")
             try Task.checkCancellation()
 
             // 2. 업로드
@@ -153,6 +228,7 @@ final class UploadViewModel: ObservableObject {
             body.addField("note", meta.note)
             body.addField("mode", "stray")
             body.addField("scan_type", meta.mode.rawValue)   // home | survey (서버 scan_points.scan_type)
+            body.addField("client_id", meta.clientId ?? "")
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
             if let fix = meta.fix {
                 body.addField("lon", String(format: "%.8f", fix.lon))
@@ -169,34 +245,73 @@ final class UploadViewModel: ObservableObject {
             try body.write(fileField: "scan_zip", fileURL: zip, fileName: directory.lastPathComponent + ".zip",
                            mimeType: "application/zip", to: bodyFile)
             bodyURL = bodyFile
+            let bodyBytes = ZipPackager.fileSize(bodyFile)
+            var attempt = UploadAttempt(startedAt: Date(), clientId: meta.clientId ?? "", transport: transport, bodyBytes: bodyBytes)
+            meta.lastAttempt = attempt
+            meta.attemptCount = (meta.attemptCount ?? 0) + 1
+            appendLog("multipart 본문 \(bodyBytes) 바이트를 \(transport) 세션으로 \(endpoints.uploadURL.absoluteString) 에 보냅니다 (시도 \(meta.attemptCount ?? 1)회째)", persist: true)
+
             var request = URLRequest(url: endpoints.uploadURL)
             request.httpMethod = "POST"
             request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let (code, data) = try await UploadClient.shared.upload(
-                request: request, bodyFile: bodyFile, taskDescription: directory.path
-            ) { [weak self] sent, total in
-                Task { @MainActor in
-                    self?.bytesSent = sent
-                    if total > 0 { self?.bytesTotal = total }
-                }
+                request: request, bodyFile: bodyFile, taskDescription: directory.path, background: background,
+                log: { [weak self] line in
+                    Task { @MainActor in self?.appendLog(line) }
+                },
+                progress: { [weak self] sent, total in
+                    Task { @MainActor in
+                        guard let self = self else { return }
+                        if sent < self.bytesSent { self.restarts += 1 }
+                        self.bytesSent = sent
+                        if total > 0 { self.bytesTotal = total }
+                    }
+                })
+            let bodyText = String(data: data.prefix(300), encoding: .utf8) ?? "(UTF-8 아님, \(data.count) 바이트)"
+            appendLog("응답: HTTP \(code) \(bodyText)")
+            attempt.finishedAt = Date()
+            attempt.httpStatus = code
+            attempt.restarts = restarts
+            let reply: (jobId: String, duplicate: Bool)
+            do {
+                reply = try UploadClient.parseUploadReply(code: code, data: data)
+            } catch {
+                attempt.error = error.localizedDescription
+                meta.lastAttempt = attempt
+                throw error
             }
-            let jobId = try UploadClient.parseUploadReply(code: code, data: data)
-            meta.upload = UploadRecord(server: endpoints.normalized, jobId: jobId, uploadedAt: Date(),
+            attempt.jobId = reply.jobId
+            attempt.duplicate = reply.duplicate
+            meta.lastAttempt = attempt
+            meta.upload = UploadRecord(server: endpoints.normalized, jobId: reply.jobId, uploadedAt: Date(),
                                        status: "pending", step: 0)
-            try? meta.save(to: directory)
+            appendLog(reply.duplicate
+                      ? "서버에 같은 스캔의 작업이 이미 있어 그 작업 \(reply.jobId) 으로 이어집니다 (duplicate)"
+                      : "작업 ID \(reply.jobId) 받음", persist: true)
             if Task.isCancelled { return }
 
             // 3. 서버 처리
             stage = .processing
-            await poll(endpoints: endpoints, jobId: jobId)
+            await poll(endpoints: endpoints, jobId: reply.jobId)
         } catch is CancellationError {
             stage = .idle
+            appendLog("취소됨", persist: true)
         } catch let error as URLError where error.code == .cancelled {
             stage = .idle
+            appendLog("전송이 취소됐습니다", persist: true)
         } catch {
             zipObserver = nil
-            fail(error.localizedDescription)
+            if meta.lastAttempt != nil, meta.lastAttempt?.finishedAt == nil {
+                meta.lastAttempt?.finishedAt = Date()
+                meta.lastAttempt?.error = error.localizedDescription
+                meta.lastAttempt?.restarts = restarts
+            }
+            if let urlError = error as? URLError {
+                fail("\(error.localizedDescription) (URLError \(urlError.code.rawValue))")
+            } else {
+                fail(error.localizedDescription)
+            }
         }
     }
 
@@ -207,6 +322,11 @@ final class UploadViewModel: ObservableObject {
                 let s = try await UploadClient.fetchStatus(endpoints.statusURL(jobId: jobId))
                 status = s
                 pollError = nil
+                let line = "\(s.status ?? "?") · 단계 \(s.step ?? 0) \(s.stepName ?? "") \(s.message ?? "")"
+                if line != lastStatusLine {
+                    lastStatusLine = line
+                    appendLog("서버: \(line)")
+                }
                 if meta.upload?.jobId == jobId {
                     meta.upload?.status = s.status
                     meta.upload?.step = s.step
@@ -218,8 +338,8 @@ final class UploadViewModel: ObservableObject {
                 }
                 if s.isDone {
                     meta.upload?.resultUrl = endpoints.resultURL(sceneItemId: s.sceneItemId, jobId: jobId).absoluteString
-                    try? meta.save(to: directory)
                     stage = .done
+                    appendLog("서버 처리 완료: \(meta.upload?.resultUrl ?? "")", persist: true)
                     return
                 }
                 if s.isFailed {
@@ -230,6 +350,7 @@ final class UploadViewModel: ObservableObject {
                 try? meta.save(to: directory)
             } catch {
                 pollError = error.localizedDescription
+                appendLog("상태 조회 오류: \(error.localizedDescription)")
             }
             try? await Task.sleep(nanoseconds: KgeoDefaults.pollIntervalSeconds * 1_000_000_000)
         }
@@ -276,9 +397,19 @@ struct UploadView: View {
                 stepRow("2. 업로드", stage: .uploading)
                 if vm.stage == .uploading {
                     ProgressView(value: uploadFraction)
-                    Text("\(megabytes(vm.bytesSent)) / \(megabytes(vm.bytesTotal)) MB")
+                    Text("\(megabytes(vm.bytesSent)) / \(megabytes(vm.bytesTotal)) MB · \(vm.transport)")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    Text(vm.transport == "background"
+                         ? "iOS 가 대신 보냅니다. 응답을 못 받으면 처음부터 다시 보낼 수 있습니다."
+                         : "업로드 중에는 앱을 열어 두세요 (화면 자동 잠금은 꺼 두었습니다).")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    if vm.restarts > 0 {
+                        Text("전송이 \(vm.restarts)회 처음부터 다시 시작됐습니다 — 서버 응답을 받지 못한 것 같습니다.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 }
                 stepRow("3. 서버 처리", stage: .processing)
                 if let s = vm.status, vm.stage >= .processing {
@@ -352,6 +483,27 @@ struct UploadView: View {
                     Label("목록으로", systemImage: "list.bullet")
                 }
             }
+
+            Section("로그 (\(vm.log.count)줄)") {
+                if let attempt = vm.meta.lastAttempt {
+                    Text(attemptSummary(attempt))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                ForEach(Array(vm.log.suffix(40).enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.system(size: 11, design: .monospaced))
+                        .lineLimit(4)
+                }
+                Button {
+                    UIPasteboard.general.string = vm.fullLogText
+                } label: {
+                    Label("로그 복사", systemImage: "doc.on.doc")
+                }
+                Text("전체 로그는 녹화 폴더의 upload.log (파일 앱 > 나의 iPhone > kgeoScan)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
         .navigationTitle("서버 업로드")
         .navigationBarTitleDisplayMode(.inline)
@@ -383,6 +535,16 @@ struct UploadView: View {
         if let name = s.stepName, !name.isEmpty { parts.append(name) }
         if let message = s.message, !message.isEmpty { parts.append(message) }
         if let st = s.status { parts.append("[\(st)]") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func attemptSummary(_ attempt: UploadAttempt) -> String {
+        var parts = ["마지막 시도 \(attempt.transport) \(attempt.bodyBytes / 1_048_576) MB"]
+        if let code = attempt.httpStatus { parts.append("HTTP \(code)") }
+        if let restarts = attempt.restarts, restarts > 0 { parts.append("재시작 \(restarts)회") }
+        if let job = attempt.jobId { parts.append("job \(job)" + ((attempt.duplicate ?? false) ? " (기존)" : "")) }
+        if let error = attempt.error { parts.append("오류: \(error)") }
+        if attempt.finishedAt == nil { parts.append("끝나지 않음") }
         return parts.joined(separator: " · ")
     }
 

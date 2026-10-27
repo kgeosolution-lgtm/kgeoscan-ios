@@ -32,15 +32,24 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 
 | 요청 | 내용 |
 |---|---|
-| `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `scan_type=home|survey`(모드), `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip). `app` 도 보내지만 서버는 무시한다. 응답 `{"job_id": "...", "mode": "stray", "scan_type": "home"}` 또는 `{"error": "..."}` |
+| `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `scan_type=home|survey`(모드), `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip), `client_id`(녹화마다 한 번 만든 UUID, 재시도해도 같음), `app`. 응답 `{"job_id": "...", "mode": "stray", "scan_type": "home"}` 또는 `{"error": "..."}`. 같은 제목·같은 zip 이름으로 24시간 안에 만든 작업이 있으면 서버가 새로 만들지 않고 그 `job_id` 를 `"duplicate": true` 와 함께 돌려준다 |
 | `GET {서버}/status.py?job_id=` | `{status, step 0..7, step_name, message, title, mode, scan_type, thumb_url, scene_item_id, glb_url}` — `done`/`failed` 가 될 때까지 3초마다 조회 |
 | 진행 페이지 | `{서버}` 의 `3dupload` 를 `3dscan` 으로 바꾼 주소 + `?job=<job_id>` — 사이트가 7단계 진행과 결과를 이어서 보여 준다 ("웹에서 진행 보기" 버튼) |
 | 결과 페이지 | 같은 주소 + `?select=<scene_item_id>` (없으면 `?job=`) |
 
 `{서버}` 기본값은 `https://kgeodata.com/app/3dupload`, 설정 화면에서 바꿀 수 있다 (UserDefaults 에 저장).
 zip 은 압축하지 않고 담기만 한다(mp4·png 는 이미 압축됨). 폴더 이름이 zip 의 최상위에 들어가며 서버는 `odometry.csv` 가 있는 폴더를 찾는다.
-업로드는 백그라운드 `URLSession` 이라 전송 중 화면을 꺼도 이어지고, 앱이 꺼진 채 끝나면 `meta.json` 에 `job_id` 를 남긴다
-(목록에서 스캔을 열어 "업로드 상태 보기"로 이어서 확인).
+
+**전송 방식**: 기본은 앱을 열어 둔 채 보내는 foreground `URLSession` 이다 (전송 중 화면 자동 잠금을 끈다). 연결이 끊기면 바로 오류가
+표시되고 자동 재전송은 없다. 설정 화면의 "백그라운드로 전송 (실험)" 을 켜면 백그라운드 `URLSession` 으로 보내 화면을 꺼도 이어지지만,
+iOS 가 응답을 받지 못하면 본문을 **처음부터 다시** 보낼 수 있다 (2026-10-27 실기기에서 진행 막대가 100% → 0% 를 반복한 현상의 유력한 원인).
+
+**중복 방지**: `job_id` 를 한 번 받은 녹화는 다시 올리지 않고 상태만 조회한다. 녹화마다 `client_id` 를 한 번 만들어 보내고, 서버는 같은
+제목·zip 이름의 24시간 내 작업을 `duplicate: true` 로 돌려주므로 재시도해도 작업이 늘지 않는다.
+
+**로그**: 업로드 화면 아래 "로그" 섹션에 압축·전송(10% 단위, 재시작 감지)·응답·네트워크 지표(HTTP 버전, 연결 재사용, 본문 전송 후
+응답까지 걸린 시간)·상태 조회가 시각과 함께 쌓이고 "로그 복사" 로 붙여 넣을 수 있다. 같은 내용이 녹화 폴더의 `upload.log` 와
+`meta.json` 의 `last_attempt`(시작·종료·HTTP 상태·재시작 횟수·job_id·오류) / `upload_log` 에 남는다.
 
 ## meta.json
 
