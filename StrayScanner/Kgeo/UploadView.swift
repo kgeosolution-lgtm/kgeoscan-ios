@@ -9,7 +9,8 @@
 import SwiftUI
 import Combine
 
-@MainActor
+/// 상태는 모두 메인 스레드에서만 바꾼다: 바꾸는 메서드마다 @MainActor 를 붙였다
+/// (클래스 전체를 @MainActor 로 하면 init 이 격리돼 StateObject 생성과 충돌한다).
 final class UploadViewModel: ObservableObject {
     enum Stage: Int, Comparable {
         case idle = 0
@@ -34,7 +35,7 @@ final class UploadViewModel: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var zipObserver: AnyCancellable?
 
-    nonisolated init(directory: URL) {
+    init(directory: URL) {
         self.directory = directory
         self.meta = ScanMeta.load(from: directory)
             ?? ScanMeta(title: directory.lastPathComponent, note: "", mode: .home,
@@ -63,6 +64,7 @@ final class UploadViewModel: ObservableObject {
         return URL(string: thumb, relativeTo: endpoints?.base)?.absoluteURL
     }
 
+    @MainActor
     func start(forceReupload: Bool = false) {
         runTask?.cancel()
         errorMessage = nil
@@ -70,6 +72,7 @@ final class UploadViewModel: ObservableObject {
         runTask = Task { await run(forceReupload: forceReupload) }
     }
 
+    @MainActor
     func cancel() {
         runTask?.cancel()
         runTask = nil
@@ -80,15 +83,18 @@ final class UploadViewModel: ObservableObject {
     }
 
     /// 화면을 떠날 때: 폴링만 멈춘다. 진행 중인 전송은 백그라운드 세션이 이어서 끝내고 meta.json 에 기록한다.
+    @MainActor
     func stopPolling() {
         runTask?.cancel()
         runTask = nil
     }
 
+    @MainActor
     private func fail(_ message: String) {
         errorMessage = message
     }
 
+    @MainActor
     private func run(forceReupload: Bool) async {
         guard let endpoints = endpoints else {
             fail("서버 주소가 올바르지 않습니다: \(meta.serverBase)")
@@ -194,6 +200,7 @@ final class UploadViewModel: ObservableObject {
         }
     }
 
+    @MainActor
     private func poll(endpoints: ServerEndpoints, jobId: String) async {
         while !Task.isCancelled {
             do {
