@@ -10,7 +10,7 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage(KgeoDefaults.serverBaseKey) private var serverBase: String = KgeoDefaults.serverBase
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
-    @AppStorage(KgeoDefaults.autoUploadKey) private var autoUpload: Bool = true
+    @AppStorage(KgeoDefaults.skipPreviewKey) private var skipPreview: Bool = false
     @AppStorage(KgeoDefaults.wifiOnlyKey) private var wifiOnly: Bool = false
     @AppStorage(KgeoDefaults.uploadTransportKey) private var transportRaw: String = UploadTransport.system.rawValue
     @AppStorage(KgeoDefaults.meshColorKey) private var meshColor: String = "red"
@@ -51,8 +51,8 @@ struct SettingsView: View {
                     Text("현재 위치 (GPS)").tag("gps")
                     Text("지도에서 선택").tag("map")
                 }
-                Toggle("녹화가 끝나면 바로 업로드", isOn: $autoUpload)
-                Text("끄면 녹화 뒤 목록으로 돌아오고, 스캔을 열어 '서버에 업로드'를 눌러 올립니다.")
+                Toggle("녹화 뒤 미리보기 없이 바로 업로드", isOn: $skipPreview)
+                Text("꺼짐(기본): 촬영이 끝나면 3D 미리보기에서 [업로드] [다시 찍기] [나중에 올리기] 를 고릅니다. 켜면 미리보기를 건너뛰고 바로 업로드합니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

@@ -63,6 +63,16 @@ struct SessionDetailView: View {
         recording.directoryPath()?.absoluteURL.standardizedFileURL
     }
 
+    /// 영상(Stray) 녹화인지. Object Capture 녹화는 rgb.mp4 대신 meta.json 을 가리킨다
+    private var hasVideo: Bool {
+        recording.absoluteRgbPath()?.pathExtension.lowercased() == "mp4"
+    }
+
+    private var thumbnailImage: UIImage? {
+        guard let directory = directoryURL else { return nil }
+        return UIImage(contentsOfFile: directory.appendingPathComponent("thumb.jpg").path)
+    }
+
     var body: some View {
         let width = UIScreen.main.bounds.size.width
         let height = width * 0.75
@@ -71,17 +81,38 @@ struct SessionDetailView: View {
                 .edgesIgnoringSafeArea(.all)
             ScrollView {
                 VStack(spacing: 16) {
-                    VideoPlayer(player: player ?? AVPlayer(url: defaultUrl))
-                        .frame(width: width, height: height)
-                        .padding(.horizontal, 0.0)
-                        .onAppear {
-                            if player == nil {
-                                player = AVPlayer(url: recording.absoluteRgbPath() ?? defaultUrl)
+                    if hasVideo {
+                        VideoPlayer(player: player ?? AVPlayer(url: defaultUrl))
+                            .frame(width: width, height: height)
+                            .padding(.horizontal, 0.0)
+                            .onAppear {
+                                if player == nil {
+                                    player = AVPlayer(url: recording.absoluteRgbPath() ?? defaultUrl)
+                                }
                             }
-                        }
+                    } else if let image = thumbnailImage {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: width, height: height)
+                            .background(Color.black)
+                    }
 
                     infoBlock
                         .padding(.horizontal, 16)
+
+                    if let directory = directoryURL {
+                        NavigationLink(destination: PreviewView(directory: directory, context: .review)) {
+                            Label("3D 미리보기", systemImage: "cube")
+                                .font(.headline)
+                                .padding(.vertical, 12)
+                                .frame(maxWidth: .infinity)
+                                .background(Color.gray.opacity(0.2))
+                                .foregroundColor(Color("TextColor"))
+                                .cornerRadius(12)
+                        }
+                        .padding(.horizontal, 16)
+                    }
 
                     if let directory = directoryURL {
                         NavigationLink(destination: UploadView(directory: directory, autoStart: false)) {

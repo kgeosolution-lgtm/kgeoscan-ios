@@ -75,6 +75,9 @@ struct SessionRow: View {
             if let frames = meta.savedFrames {
                 parts.append("\(frames) 프레임")
             }
+            if let images = meta.objcap?.images {
+                parts.append("사진 \(images)장")
+            }
         }
         return parts.joined(separator: " · ")
     }

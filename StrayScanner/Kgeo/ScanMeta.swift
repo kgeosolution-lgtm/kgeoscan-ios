@@ -87,6 +87,19 @@ struct ObjectInfo: Codable, Hashable {
     var elevationBands: [String: Float]?
 }
 
+/// Object Capture 기록 (meta.json 의 objcap)
+struct ObjcapInfo: Codable, Hashable {
+    /// PhotogrammetrySession 디테일. iOS 는 reduced 만 지원한다 (Apple 문서)
+    var detail: String
+    var images: Int
+    /// device (폰에서 모델 생성) | none (사진만 — 서버/워커가 처리)
+    var reconstruction: String
+    var posedImages: Int?
+    var passes: Int?
+    var error: String?
+    var reconstructionSeconds: Double?
+}
+
 struct ScanMeta: Codable, Hashable {
     static let fileName = "meta.json"
 
@@ -126,6 +139,21 @@ struct ScanMeta: Codable, Hashable {
     var objectMode: Bool?
     /// 물체 중심·반경·커버리지 (ARKit 월드 좌표 = odometry.csv 좌표계)
     var object: ObjectInfo?
+    /// 촬영 방식: video (Stray 영상·깊이) | objcap (Apple Object Capture 사진). nil = video
+    var capture: String?
+    var objcap: ObjcapInfo?
+
+    var isObjcap: Bool { capture == "objcap" }
+
+    /// 같은 설정으로 다시 찍을 때 쓸 새 메타 (촬영 결과·업로드 기록은 버린다)
+    func freshCopy() -> ScanMeta {
+        var copy = ScanMeta(title: title, note: note, mode: mode, serverBase: serverBase)
+        copy.locationSource = locationSource
+        copy.manualFix = manualFix
+        copy.objectMode = objectMode
+        copy.capture = capture
+        return copy
+    }
     var fix: GeoFix?
     var upload: UploadRecord?
     /// 이 녹화의 업로드 식별자. 앱이 한 번 만들어 재시도해도 같은 값을 upload 필드 client_id 로 보낸다

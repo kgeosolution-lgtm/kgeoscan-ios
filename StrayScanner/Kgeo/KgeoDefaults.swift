@@ -39,6 +39,10 @@ enum KgeoDefaults {
     static let locationSourceKey = "kgeo.locationSource"
     /// 현장조사에서 물체 모드 (기본 켬)
     static let objectModeKey = "kgeo.objectMode"
+    /// 녹화 뒤 미리보기 없이 바로 업로드 (기본 false = 미리보기 먼저)
+    static let skipPreviewKey = "kgeo.skipPreview"
+    /// 물체 모드 촬영 방식: objcap (고화질 사진, 기본) | video
+    static let captureMethodKey = "kgeo.captureMethod"
 
     static var objectModeDefault: Bool {
         UserDefaults.standard.object(forKey: objectModeKey) == nil ? true : UserDefaults.standard.bool(forKey: objectModeKey)

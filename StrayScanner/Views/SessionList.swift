@@ -15,6 +15,7 @@ import CoreData
 enum ScanRoute: Hashable {
     case setup
     case record(ScanMeta)
+    case preview(URL)
     case upload(URL)
     case settings
 }
@@ -72,7 +73,12 @@ struct SessionList: View {
     @ObservedObject var viewModel = SessionListViewModel()
     @State private var showingInfo = false
     @State private var path: [ScanRoute] = []
-    @AppStorage(KgeoDefaults.autoUploadKey) private var autoUpload: Bool = true
+    @AppStorage(KgeoDefaults.skipPreviewKey) private var skipPreview: Bool = false
+
+    /// 촬영이 끝나면: 미리보기(기본) 또는 바로 업로드. 촬영 화면은 경로에서 뺀다
+    private func afterCapture(_ directory: URL) {
+        path = skipPreview ? [.upload(directory)] : [.preview(directory)]
+    }
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -156,13 +162,13 @@ struct SessionList: View {
                     }
                 case .record(let meta):
                     RecordScreen(meta: meta) { directory in
-                        // 녹화 화면을 빼고 업로드 화면으로 바꿔 끼운다 (자동 업로드가 꺼져 있으면 목록으로)
-                        if autoUpload {
-                            path = [.upload(directory)]
-                        } else {
-                            path = []
-                        }
+                        afterCapture(directory)
                     }
+                case .preview(let directory):
+                    PreviewView(directory: directory, context: .afterCapture,
+                                onUpload: { path = [.upload(directory)] },
+                                onRetake: { fresh in path = [.setup, .record(fresh)] },
+                                onLater: { path = [] })
                 case .upload(let directory):
                     UploadView(directory: directory)
                 case .settings:

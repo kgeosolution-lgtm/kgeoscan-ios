@@ -39,6 +39,8 @@ struct CaptureStats: Codable, Hashable {
     /// 물체 모드: 방위 커버리지 % 와 고도 3단 %
     var coveragePct: Float? = nil
     var elevationBands: [String: Float]? = nil
+    /// 경고 종류별 샘플 수 (10 Hz): tracking, close, far, no_depth, fast, blur, low_confidence, object
+    var warningCounts: [String: Int]? = nil
 
     var isPoor: Bool { !warnings.isEmpty }
 }
@@ -78,6 +80,12 @@ final class CaptureGuide {
     private var confidenceSamples: [Float] = []
     private var speedSamples: [Float] = []
     private var sharpnessSamples: [Float] = []
+    private var warningCounter: [String: Int] = [:]
+
+    /// 녹화 중 화면에 뜬 경고를 센다 (물체 모드 경고 등 바깥에서 판단한 것)
+    func countWarning(_ key: String) {
+        warningCounter[key, default: 0] += 1
+    }
 
     func reset() {
         lastTransform = nil
@@ -94,6 +102,7 @@ final class CaptureGuide {
         confidenceSamples.removeAll()
         speedSamples.removeAll()
         sharpnessSamples.removeAll()
+        warningCounter.removeAll()
     }
 
     /// recording = true 면 이 샘플을 통계에 넣는다.
@@ -185,6 +194,25 @@ final class CaptureGuide {
             if let c = confidence { confidenceSamples.append(c) }
             speedSamples.append(speedEMA)
             sharpnessSamples.append(sharpness)
+            var counted: String?
+            if trackingWarning != nil {
+                counted = "tracking"
+            } else if distanceWarning != nil {
+                if let d = depth {
+                    counted = d < thresholds.minDistance ? "close" : "far"
+                } else {
+                    counted = "no_depth"
+                }
+            } else if speedWarning != nil {
+                counted = "fast"
+            } else if blurWarning != nil {
+                counted = "blur"
+            } else if confidenceWarning != nil {
+                counted = "low_confidence"
+            }
+            if let key = counted {
+                warningCounter[key, default: 0] += 1
+            }
         }
 
         let warning = trackingWarning ?? distanceWarning ?? speedWarning ?? blurWarning ?? confidenceWarning
@@ -222,7 +250,8 @@ final class CaptureGuide {
         return CaptureStats(samples: speedSamples.count, avgDistance: avgDepth, minDistance: minDepth,
                             avgSpeed: avgSpeed, maxSpeed: maxSpeed, speedOverLimitRatio: overLimit,
                             highConfidenceRatio: avgConfidence, sharpnessMedian: sharpnessMedian,
-                            sharpnessMax: sharpnessMaxValue, warnings: warnings)
+                            sharpnessMax: sharpnessMaxValue, warnings: warnings,
+                            warningCounts: warningCounter.isEmpty ? nil : warningCounter)
     }
 
     /// 깊이맵 중앙 40% 영역을 16×12 로 샘플링한 중앙값 (m). 유효 값이 적으면 nil

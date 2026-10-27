@@ -108,6 +108,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var pendingDesignationPoint: CGPoint?
     private var fixedGeoFix: GeoFix?
 
+    // 미리보기 정점 색용 키프레임 (녹화 중 0.7초마다, 60장을 넘으면 절반으로 솎고 간격을 두 배로)
+    private var colorKeyframes: [ColorKeyframe] = []
+    private var lastKeyframeTime: TimeInterval = 0
+    private var keyframeInterval: TimeInterval = 0.7
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -396,6 +401,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         bestThumbSharpness = -1
         lastThumbCheck = 0
         thumbWritten = false
+        colorKeyframes = []
+        lastKeyframeTime = 0
+        keyframeInterval = 0.7
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
@@ -484,27 +492,26 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                         stats.warnings.append(String(format: "물체 둘레 커버리지 %.0f%% — 70%% 이상 권장 (한 바퀴를 더 도세요)", coverage))
                     }
                 }
-                if stats.isPoor {
-                    showSummary(stats: stats) { [weak self] keep in
-                        guard let self = self else { return }
-                        if keep {
-                            self.finishRecording(started: started, encoder: encoder, directory: directory, stats: stats)
-                        } else {
-                            try? FileManager.default.removeItem(at: directory)
-                            self.datasetEncoder = nil
-                        }
-                    }
-                } else {
-                    finishRecording(started: started, encoder: encoder, directory: directory, stats: stats)
-                }
+                // 품질 판단(다시 찍기)은 미리보기 화면에서 한다. 미리보기용 ARKit 메시는 지금 복사해 둔다
+                let mesh = meshSupported ? MeshSnapshot.capture(from: session.currentFrame) : nil
+                finishRecording(started: started, encoder: encoder, directory: directory, stats: stats, mesh: mesh)
             case .videoEncodingError, .directoryCreationError:
                 showError(message: "영상 인코딩 중 오류가 났습니다. 다시 녹화해 주세요.")
         }
     }
 
-    private func finishRecording(started: Date, encoder: DatasetEncoder, directory: URL, stats: CaptureStats) {
+    private func finishRecording(started: Date, encoder: DatasetEncoder, directory: URL, stats: CaptureStats,
+                                 mesh: MeshSnapshot?) {
         saveRecording(started, encoder)
         writeMeta(started: started, encoder: encoder, directory: directory, stats: stats)
+        if let mesh = mesh {
+            var crop: PreviewCrop?
+            if objectMode, let center = objectTracker.center {
+                crop = PreviewCrop(center: center, radius: objectTracker.radius)
+            }
+            PreviewBuilder.shared.start(directory: directory, mesh: mesh, keyframes: colorKeyframes, crop: crop)
+        }
+        colorKeyframes = []
         if let onFinished = onFinished {
             onFinished(directory)
         } else {
@@ -541,6 +548,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         meta.systemVersion = UIDevice.current.systemVersion
         meta.fix = geoFix
         meta.exposureMode = ExposureController.currentMode.rawValue
+        meta.capture = "video"
         meta.meshOverlay = meshSupported
         meta.captureStats = stats
         meta.folderBytes = RecordSessionViewController.folderSize(directory)
@@ -574,23 +582,6 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             }
         }
         return total
-    }
-
-    private func showSummary(stats: CaptureStats, completion: @escaping (Bool) -> Void) {
-        var lines = stats.warnings
-        if let d = stats.avgDistance {
-            lines.append(String(format: "평균 거리 %.2f m, 최대 속도 %.1f m/s", d, stats.maxSpeed))
-        }
-        if let coverage = stats.coveragePct {
-            let bands = stats.elevationBands ?? [:]
-            lines.append(String(format: "둘레 커버리지 %.0f%% · 고도 낮음 %.0f%% / 중간 %.0f%% / 위 %.0f%%",
-                                coverage, bands["low"] ?? 0, bands["mid"] ?? 0, bands["high"] ?? 0))
-        }
-        let message = lines.joined(separator: "\n") + "\n\n이대로 올릴 수도 있지만 다시 찍으면 결과가 좋아집니다."
-        let controller = UIAlertController(title: "촬영 품질 확인", message: message, preferredStyle: .alert)
-        controller.addAction(UIAlertAction(title: "다시 찍기 (삭제)", style: .destructive, handler: { _ in completion(false) }))
-        controller.addAction(UIAlertAction(title: "이대로 진행", style: .default, handler: { _ in completion(true) }))
-        self.present(controller, animated: true, completion: nil)
     }
 
     private func showError(message: String, popOnDismiss: Bool = true) {
@@ -807,6 +798,20 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         encoder.add(frame: frame)
         considerThumbnail(frame: frame, directory: encoder.directory.absoluteURL.standardizedFileURL)
+        considerColorKeyframe(frame: frame)
+    }
+
+    /// 미리보기 정점 색용 키프레임 (트래킹 정상일 때만)
+    private func considerColorKeyframe(frame: ARFrame) {
+        guard meshSupported, frame.timestamp - lastKeyframeTime >= keyframeInterval else { return }
+        guard case .normal = frame.camera.trackingState else { return }
+        lastKeyframeTime = frame.timestamp
+        guard let keyframe = ColorKeyframe(frame: frame) else { return }
+        colorKeyframes.append(keyframe)
+        if colorKeyframes.count > 60 {
+            colorKeyframes = colorKeyframes.enumerated().filter { $0.offset % 2 == 0 }.map { $0.element }
+            keyframeInterval *= 2
+        }
     }
 
     /// 녹화 시작 20초 동안 1초마다 선명도를 보고, 가장 선명한 프레임을 thumb.jpg 로 남긴다
@@ -858,6 +863,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             text = guidance.warning
         } else if objectMode, let objectWarning = objectTracker.warning() {
             text = objectWarning
+            if capturing {
+                guide.countWarning("object")
+            }
         } else {
             text = guidance.warning
         }
