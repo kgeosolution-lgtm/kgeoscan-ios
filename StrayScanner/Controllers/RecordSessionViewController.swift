@@ -129,6 +129,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var lastShakeSkipTime: TimeInterval = 0
     private var lastGuidanceSpeed: Float = 0
     private var lastGuidanceRotation: Float = 0
+    /// 이 기기의 ARKit 광각 카메라 내부 파라미터를 한 번 저장했는지 (Object Capture 사진의 내부 파라미터 환산용)
+    private var intrinsicsChecked = false
 
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
@@ -811,6 +813,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         frameCounter += 1
+        if !intrinsicsChecked, case .normal = frame.camera.trackingState {
+            intrinsicsChecked = true
+            if CameraIntrinsics.cached() == nil,
+               arConfiguration?.videoFormat.captureDeviceType == .builtInWideAngleCamera {
+                CameraIntrinsics.store(CameraIntrinsics(frame: frame))
+            }
+        }
         if awaitingFrameFix {
             var ready = false
             if case .normal = frame.camera.trackingState {

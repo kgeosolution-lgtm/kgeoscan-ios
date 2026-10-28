@@ -72,6 +72,8 @@ final class ObjcapModel: ObservableObject {
     private var captureStartedAt: Date?
     private var captureEndedAt: Date?
     private var geoFix: GeoFix?
+    /// ARKit 광각 카메라 내부 파라미터 (사진 해상도로 환산해 poses.json 에 쓴다)
+    private var arkitIntrinsics: CameraIntrinsics?
 
     var heicDirectory: URL { directory.appendingPathComponent("heic", isDirectory: true) }
     var checkpointDirectory: URL { directory.appendingPathComponent("checkpoint", isDirectory: true) }
@@ -104,6 +106,29 @@ final class ObjcapModel: ObservableObject {
             return
         }
         LocationService.shared.start()
+        // 이 기기의 ARKit 내부 파라미터가 없으면 Object Capture 전에 잠깐 읽어 둔다 (한 번만)
+        if let cached = CameraIntrinsics.cached() {
+            arkitIntrinsics = cached
+            startCaptureSession()
+            return
+        }
+        detail = "카메라 보정값 확인 중…"
+        Task { [weak self] in
+            let measured = await IntrinsicsProbe.measure()
+            guard let self = self, !self.cancelled else { return }
+            if let measured = measured {
+                CameraIntrinsics.store(measured)
+                self.arkitIntrinsics = measured
+            }
+            self.detail = ""
+            try? await Task.sleep(nanoseconds: 500_000_000)   // ARSession 이 카메라를 놓을 시간
+            guard !self.cancelled else { return }
+            self.startCaptureSession()
+        }
+    }
+
+    private func startCaptureSession() {
+        guard !cancelled, session == nil else { return }
         let newSession = ObjectCaptureSession()
         var configuration = ObjectCaptureSession.Configuration()
         configuration.checkpointDirectory = checkpointDirectory
@@ -198,8 +223,10 @@ final class ObjcapModel: ObservableObject {
         let images = imagesDirectory
         let root = directory
         let estimatedPoses = poses
+        let cameraIntrinsics = arkitIntrinsics
         let export = await Task.detached(priority: .userInitiated) { () -> ObjcapExportResult in
-            ObjcapExporter.export(heicDirectory: heic, imagesDirectory: images, root: root, poses: estimatedPoses) { fraction in
+            ObjcapExporter.export(heicDirectory: heic, imagesDirectory: images, root: root, poses: estimatedPoses,
+                                  arkit: cameraIntrinsics) { fraction in
                 Task { @MainActor [weak self] in
                     self?.phase = .exporting(fraction)
                 }
@@ -207,6 +234,7 @@ final class ObjcapModel: ObservableObject {
         }.value
         info.images = export.images
         info.posedImages = export.posedImages
+        info.intrinsics = export.intrinsicsSource
         guard !cancelled else { return }
 
         writeMeta(info: info, thumbWritten: export.thumbWritten)
@@ -582,6 +610,8 @@ struct ObjcapExportResult: Sendable {
     var images: Int
     var posedImages: Int
     var thumbWritten: Bool
+    /// 가장 많이 쓴 내부 파라미터 출처
+    var intrinsicsSource: String?
 }
 
 @available(iOS 17.0, *)
@@ -606,7 +636,7 @@ enum ObjcapExporter {
 
     /// heic/ → images/*.jpg, poses.json, thumb.jpg
     static func export(heicDirectory: URL, imagesDirectory: URL, root: URL, poses: PhotogrammetrySession.Poses?,
-                       progress: (Double) -> Void) -> ObjcapExportResult {
+                       arkit: CameraIntrinsics?, progress: (Double) -> Void) -> ObjcapExportResult {
         let allowed: Set<String> = ["heic", "heif", "jpg", "jpeg", "png"]
         let inputs = ((try? FileManager.default.contentsOfDirectory(at: heicDirectory, includingPropertiesForKeys: nil,
                                                                      options: [.skipsHiddenFiles])) ?? [])
@@ -627,12 +657,14 @@ enum ObjcapExporter {
         var written = 0
         var bestSharpness = -1.0
         var bestInput: URL?
+        var sourceCounts: [String: Int] = [:]
         for (index, input) in inputs.enumerated() {
             progress(Double(index) / Double(max(inputs.count, 1)))
             let base = input.deletingPathExtension().lastPathComponent
             let output = imagesDirectory.appendingPathComponent(base + ".jpg", isDirectory: false)
-            guard let converted = convert(input, to: output) else { continue }
+            guard let converted = convert(input, to: output, arkit: arkit) else { continue }
             written += 1
+            sourceCounts[converted.intrinsicsSource, default: 0] += 1
             let file = "images/" + output.lastPathComponent
             if index % 4 == 0, let value = sharpness(of: input), value > bestSharpness {
                 bestSharpness = value
@@ -663,23 +695,30 @@ enum ObjcapExporter {
             thumbWritten = writeThumbnail(from: best, to: root.appendingPathComponent("thumb.jpg", isDirectory: false))
         }
 
-        let document: [String: Any] = [
+        var document: [String: Any] = [
             "frame": "model",
             "units": "m",
             "up": "y",
             "pose_source": "PhotogrammetrySession .poses (iOS, on device)",
-            "transform_convention": "column-major 4x4, camera-to-model; camera axes assumed ARKit/RealityKit (x right, y up, -z forward) — verify by reprojection",
-            "image_orientation": "JPEG pixels are stored in sensor orientation (EXIF orientation not applied, written as 1); the original tag is exif_orientation",
+            "transform_convention": "column-major 4x4, camera-to-model; camera axes ARKit/RealityKit (x right, y up, -z forward). Matched SfM on 2026-10-28: 0.31 cm RMS, 0.19 deg",
+            "image_orientation": "JPEG pixels are stored in sensor orientation (EXIF orientation not applied, written as 1); the original tag is exif_orientation. Other EXIF/TIFF tags are copied from the HEIC",
+            "intrinsics_note": "intrinsics_source per image: depth_calibration (HEIC depth calibration) > arkit_scaled (ARKit wide camera intrinsics scaled to the JPEG size, same 4:3 full field of view) > exif_35mm > guess",
+            "intrinsics_sources": sourceCounts,
             "poses_available": poses != nil,
             "images": entries,
             "unposed_images": unposed,
         ]
+        if let arkit = arkit {
+            document["arkit_intrinsics"] = arkit.dictionary
+        }
         if let data = try? JSONSerialization.data(withJSONObject: document,
                                                   options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
             try? data.write(to: root.appendingPathComponent("poses.json", isDirectory: false), options: .atomic)
         }
         progress(1)
-        return ObjcapExportResult(images: written, posedImages: entries.count, thumbWritten: thumbWritten)
+        let mainSource = sourceCounts.max { $0.value < $1.value }?.key
+        return ObjcapExportResult(images: written, posedImages: entries.count, thumbWritten: thumbWritten,
+                                  intrinsicsSource: mainSource)
     }
 
     /// 열 우선 4×4 (회전 + 이동)
@@ -693,8 +732,9 @@ enum ObjcapExporter {
         return [c0.x, c0.y, c0.z, c0.w, c1.x, c1.y, c1.z, c1.w, c2.x, c2.y, c2.z, c2.w, c3.x, c3.y, c3.z, c3.w]
     }
 
-    /// HEIC → JPEG (센서 방향 그대로, 긴 변 최대 4032) 와 그 해상도 기준 내부 파라미터
-    static func convert(_ input: URL, to output: URL) -> ConvertedImage? {
+    /// HEIC → JPEG (센서 방향 그대로, 긴 변 최대 4032, 원본 EXIF·TIFF·GPS 유지, Orientation 1) 와 그 해상도 기준 내부 파라미터.
+    /// 내부 파라미터 순서: HEIC 깊이 보정값 → ARKit 광각 카메라 값 환산 → EXIF 35mm 환산 → 추정
+    static func convert(_ input: URL, to output: URL, arkit: CameraIntrinsics?) -> ConvertedImage? {
         guard let source = CGImageSourceCreateWithURL(input as CFURL, nil) else { return nil }
         let properties = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
         let rawWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
@@ -716,15 +756,30 @@ enum ObjcapExporter {
         guard let cgImage = image,
               let destination = CGImageDestinationCreateWithURL(output as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
         else { return nil }
-        let destinationOptions: [CFString: Any] = [
-            kCGImageDestinationLossyCompressionQuality: jpegQuality,
-            kCGImagePropertyOrientation: 1,
-        ]
-        CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-
         let width = cgImage.width
         let height = cgImage.height
+
+        // 사진측량 프로그램이 EXIF 초점거리·기기 정보로 시작값을 잡으므로 원본 메타데이터를 옮긴다
+        var destinationOptions: [CFString: Any] = [:]
+        for key in [kCGImagePropertyExifDictionary, kCGImagePropertyTIFFDictionary,
+                    kCGImagePropertyGPSDictionary, kCGImagePropertyExifAuxDictionary] {
+            if let value = properties[key] {
+                destinationOptions[key] = value
+            }
+        }
+        if var tiff = destinationOptions[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1
+            destinationOptions[kCGImagePropertyTIFFDictionary] = tiff
+        }
+        if var exif = destinationOptions[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            exif[kCGImagePropertyExifPixelXDimension] = width
+            exif[kCGImagePropertyExifPixelYDimension] = height
+            destinationOptions[kCGImagePropertyExifDictionary] = exif
+        }
+        destinationOptions[kCGImagePropertyOrientation] = 1
+        destinationOptions[kCGImageDestinationLossyCompressionQuality] = jpegQuality
+        CGImageDestinationAddImage(destination, cgImage, destinationOptions as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
         if let found = ObjcapExporter.calibration(from: source) {
             let matrix = found.matrix
             let referenceWidth = Double(found.reference.width)
@@ -748,7 +803,27 @@ enum ObjcapExporter {
                                       orientation: orientation, intrinsicsSource: "depth_calibration_rotated90")
             }
         }
-        // EXIF 35mm 환산 초점거리로 추정
+        // ARKit 광각 카메라의 실제 내부 파라미터를 사진 해상도로 환산 (같은 4:3 전체 화각)
+        if let k = arkit, k.width > 0, k.height > 0 {
+            if (k.width >= k.height) == (width >= height) {
+                let sx = Double(width) / k.width
+                let sy = Double(height) / k.height
+                if abs(sx - sy) / sx < 0.01 {
+                    return ConvertedImage(width: width, height: height, fx: k.fx * sx, fy: k.fy * sy,
+                                          cx: k.cx * sx, cy: k.cy * sy,
+                                          orientation: orientation, intrinsicsSource: "arkit_scaled")
+                }
+            } else {
+                let sx = Double(width) / k.height
+                let sy = Double(height) / k.width
+                if abs(sx - sy) / sx < 0.01 {
+                    return ConvertedImage(width: width, height: height, fx: k.fy * sx, fy: k.fx * sy,
+                                          cx: (k.height - k.cy) * sx, cy: k.cx * sy,
+                                          orientation: orientation, intrinsicsSource: "arkit_scaled_rotated90")
+                }
+            }
+        }
+        // EXIF 35mm 환산 초점거리로 추정 (35mm 값이 정수로 반올림돼 몇 % 어긋날 수 있다)
         let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
         let diagonal = sqrt(Double(width * width + height * height))
         if let f35 = (exif?[kCGImagePropertyExifFocalLenIn35mmFilm] as? NSNumber)?.doubleValue, f35 > 0 {

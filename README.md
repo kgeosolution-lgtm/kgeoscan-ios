@@ -51,7 +51,10 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   '위에서 한 바퀴 더 / 물체를 뒤집고 / 촬영 끝내기' 를 고른다(한국어 안내·피드백). 끝나면 `PhotogrammetrySession` 으로 폰에서
   `model/` 에 OBJ+MTL+텍스처를 만든다 — **iOS 는 detail `.reduced` 만 지원** (Apple 문서: "On iOS, only one detail level – .reduced – is currently supported";
   `.medium`/`.preview` 는 macOS 전용). 사진은 `images/*.jpg`(긴 변 최대 4032, 품질 0.85, 센서 방향 그대로, EXIF orientation 미적용)로 바꾸고,
-  `.poses` 결과로 `poses.json`(사진별 4×4 열 우선 카메라→모델 변환, 내부 파라미터는 HEIC 깊이 보정값 또는 EXIF 35mm 환산, JPEG 해상도 기준)을 쓴다.
+  `.poses` 결과로 `poses.json`(사진별 4×4 열 우선 카메라→모델 변환, JPEG 해상도 기준 내부 파라미터)을 쓴다. 자세는 2026-10-28 SfM 검증에서
+  위치 RMS 0.31 cm, 방향 0.19° 로 맞았다. JPEG 에는 원본 HEIC 의 EXIF·TIFF·GPS 를 옮긴다(Orientation 만 1, 원래 값은 `exif_orientation`).
+  내부 파라미터 출처(`intrinsics_source`)는 HEIC 깊이 보정값 → `arkit_scaled`(이 기기 ARKit 광각 카메라 값을 사진 해상도로 환산; 처음 한 번은
+  Object Capture 전에 2초 이내로 ARSession 을 돌려 읽고 기기별로 저장, 영상 녹화 때도 저장) → `exif_35mm`(35mm 값 반올림 때문에 약 4% 짧게 나왔다) 순이다.
   업로드 필드 `mode=objcap`, `scan_type=survey`. zip 에는 `model/`, `images/`, `poses.json`, `thumb.jpg`, `meta.json` 만 들어가고 원본 HEIC(`heic/`)와 `checkpoint/` 는 폰에 남는다.
 - **면 촬영 (정사영상)** ([HiresRecorder.swift](StrayScanner/Kgeo/HiresRecorder.swift)): 현장조사의 촬영 대상 '면 (정사영상)', 대상 면 '바닥·트렌치 / 벽 / 자동'.
   매설관 트렌치(되메우기 전), 벽 균열, 바닥을 위·정면에서 본 실측 사진으로 남기기 위한 것이다. 녹화는 Stray 형식 그대로 하면서

@@ -110,6 +110,8 @@ struct ObjcapInfo: Codable, Hashable {
     var passes: Int?
     var error: String?
     var reconstructionSeconds: Double?
+    /// poses.json 내부 파라미터의 주 출처: depth_calibration | arkit_scaled | exif_35mm | guess
+    var intrinsics: String?
 }
 
 struct ScanMeta: Codable, Hashable {
