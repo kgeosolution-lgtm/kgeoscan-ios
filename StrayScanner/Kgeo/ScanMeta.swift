@@ -87,6 +87,18 @@ struct ObjectInfo: Codable, Hashable {
     var elevationBands: [String: Float]?
 }
 
+/// 면 촬영(정사영상) 기록 (meta.json 의 area). 업로드 필드 area_mode=1, area_surface
+struct AreaInfo: Codable, Hashable {
+    /// floor (바닥·트렌치, 위에서) | wall (벽, 정면) | auto
+    var surface: String
+    /// 저장된 고해상도 사진 수 (hires/)
+    var hires: Int
+    /// 흔들려서 건너뛴 횟수 (대략)
+    var hiresSkipped: Int?
+    /// 고해상도 정지 사진에 맞는 영상 형식이었는지
+    var hiresFormatRecommended: Bool?
+}
+
 /// Object Capture 기록 (meta.json 의 objcap)
 struct ObjcapInfo: Codable, Hashable {
     /// PhotogrammetrySession 디테일. iOS 는 reduced 만 지원한다 (Apple 문서)
@@ -139,9 +151,10 @@ struct ScanMeta: Codable, Hashable {
     var objectMode: Bool?
     /// 물체 중심·반경·커버리지 (ARKit 월드 좌표 = odometry.csv 좌표계)
     var object: ObjectInfo?
-    /// 촬영 방식: video (Stray 영상·깊이) | objcap (Apple Object Capture 사진). nil = video
+    /// 촬영 방식: video (Stray 영상·깊이) | area (영상 + 고해상도 사진, 정사영상) | objcap (Apple Object Capture 사진). nil = video
     var capture: String?
     var objcap: ObjcapInfo?
+    var area: AreaInfo?
 
     var isObjcap: Bool { capture == "objcap" }
 
@@ -152,6 +165,9 @@ struct ScanMeta: Codable, Hashable {
         copy.manualFix = manualFix
         copy.objectMode = objectMode
         copy.capture = capture
+        if let area = area {
+            copy.area = AreaInfo(surface: area.surface, hires: 0)
+        }
         return copy
     }
     var fix: GeoFix?

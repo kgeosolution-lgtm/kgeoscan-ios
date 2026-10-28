@@ -13,7 +13,25 @@ import AVFoundation
 
 class OdometryEncoder {
     let path: URL
-    let q_AC = simd_quatf(ix: 1.0, iy: 0.0, iz: 0.0, r: 0.0)
+    let q_AC = OdometryEncoder.cameraAxisFlip
+
+    // kgeoScan: odometry.csv 와 hires/poses.json 이 똑같은 자세를 쓰도록 변환을 한곳에 모았다 (값은 원본과 같다).
+    /// ARKit 카메라(x 오른쪽, y 위, -z 앞) → odometry.csv 카메라(OpenCV: x 오른쪽, y 아래, z 앞): x 축 180° 회전
+    static let cameraAxisFlip = simd_quatf(ix: 1.0, iy: 0.0, iz: 0.0, r: 0.0)
+
+    /// odometry.csv 한 행의 자세: (월드 위치 x y z, 카메라→월드 회전 qx qy qz qw)
+    static func pose(of transform: simd_float4x4) -> (translation: vector_float3, rotation: simd_quatf) {
+        let t = transform[3]
+        return (vector_float3(t.x, t.y, t.z), simd_quatf(transform) * cameraAxisFlip)
+    }
+
+    /// 같은 자세를 4×4 카메라→월드 행렬로 (열 우선)
+    static func cameraToWorld(_ transform: simd_float4x4) -> simd_float4x4 {
+        let p = pose(of: transform)
+        var m = simd_float4x4(p.rotation)
+        m.columns.3 = SIMD4<Float>(p.translation.x, p.translation.y, p.translation.z, 1)
+        return m
+    }
     var transforms: [simd_float4x4] = []
     let fileHandle: FileHandle
     
@@ -33,9 +51,9 @@ class OdometryEncoder {
     func add(frame: ARFrame, currentFrame: Int) {
         let transform = frame.camera.transform
         transforms.append(transform)
-        let xyz: vector_float3 = getTranslation(T: transform)
-        let q_WA = simd_quatf(transform)
-        let q: vector_float4 = (q_WA * q_AC).vector
+        let pose = OdometryEncoder.pose(of: transform)
+        let xyz: vector_float3 = pose.translation
+        let q: vector_float4 = pose.rotation.vector
         let frameNumber = String(format: "%06d", currentFrame)
 
         let intrinsics = frame.camera.intrinsics

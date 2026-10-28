@@ -53,6 +53,16 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   `.medium`/`.preview` 는 macOS 전용). 사진은 `images/*.jpg`(긴 변 최대 4032, 품질 0.85, 센서 방향 그대로, EXIF orientation 미적용)로 바꾸고,
   `.poses` 결과로 `poses.json`(사진별 4×4 열 우선 카메라→모델 변환, 내부 파라미터는 HEIC 깊이 보정값 또는 EXIF 35mm 환산, JPEG 해상도 기준)을 쓴다.
   업로드 필드 `mode=objcap`, `scan_type=survey`. zip 에는 `model/`, `images/`, `poses.json`, `thumb.jpg`, `meta.json` 만 들어가고 원본 HEIC(`heic/`)와 `checkpoint/` 는 폰에 남는다.
+- **면 촬영 (정사영상)** ([HiresRecorder.swift](StrayScanner/Kgeo/HiresRecorder.swift)): 현장조사의 촬영 대상 '면 (정사영상)', 대상 면 '바닥·트렌치 / 벽 / 자동'.
+  매설관 트렌치(되메우기 전), 벽 균열, 바닥을 위·정면에서 본 실측 사진으로 남기기 위한 것이다. 녹화는 Stray 형식 그대로 하면서
+  `ARSession.captureHighResolutionFrame` 로 마지막 사진보다 12 cm 이상 움직이거나 10° 이상 돌았을 때(흔들리면 건너뜀, 최대 200장)
+  고해상도 정지 사진을 `hires/000001.jpg …`(품질 0.9, 긴 변 최대 4032, 센서 방향 그대로)로 저장하고, 끝에 `hires/poses.json` 을 쓴다:
+  `{"frame":"odometry","images":[{"file","timestamp","transform"(열 우선 4×4 카메라→월드),"fx","fy","cx","cy","width","height","exif_orientation":6}]}`.
+  **transform 은 odometry.csv 행과 같은 함수**(`OdometryEncoder.pose(of:)` / `cameraToWorld`, ARKit 자세 × x축 180° = OpenCV 카메라)로 만들고,
+  timestamp 도 같은 ARFrame 시간축이다. 녹화 해상도·fps 가 같은 경우에만 고해상도 정지 사진용 영상 형식으로 바꾼다(rgb.mp4 1920×1440 유지).
+  안내: 대상 면까지 0.4~1.2 m, 0.4 m/s 이하, '천천히 지그재그로 겹치게', 바닥 모드는 폰이 아래를 보도록(정면 방향과 연직 37° 이내),
+  벽 모드는 수평으로 보도록. 화면에 고해상도 장수 표시. `meta.json`: `capture:"area"`, `area:{surface, hires, hires_skipped, hires_format_recommended}`.
+  업로드 필드: `mode=stray` + `area_mode=1` + `area_surface=floor|wall|auto`.
 - **목록·설정**: 썸네일(녹화 중 가장 선명한 프레임 `thumb.jpg`), 용량, 배지(미업로드/업로드 중/처리 중/완료/실패), 스와이프 삭제.
   설정(톱니): 서버 주소, 기본 스캔 유형·위치 입력, 녹화 뒤 자동 업로드, Wi-Fi 에서만 업로드, 백그라운드 전송(실험), 노출.
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,

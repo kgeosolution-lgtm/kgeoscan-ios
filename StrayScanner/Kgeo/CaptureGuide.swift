@@ -61,6 +61,10 @@ final class CaptureGuide {
     static let home = Thresholds(minDistance: 0.3, maxDistance: 3.0, maxSpeed: 0.7, maxRotation: 60,
                                  tooCloseText: "너무 가깝습니다 (%.2f m) — 30 cm 이상 떨어지세요",
                                  tooFarText: "너무 멉니다 (%.1f m) — 3 m 이내로 다가가세요")
+    /// 면 촬영(정사영상): 대상 면까지 0.4~1.2 m, 천천히
+    static let area = Thresholds(minDistance: 0.4, maxDistance: 1.2, maxSpeed: 0.4, maxRotation: 40,
+                                 tooCloseText: "대상 면에 너무 가깝습니다 (%.2f m) — 40 cm 이상 떨어지세요",
+                                 tooFarText: "대상 면에서 너무 멉니다 (%.1f m) — 1.2 m 이내로")
     /// 물체 모드: 물체까지 35~90 cm
     static let object = Thresholds(minDistance: 0.35, maxDistance: 0.9, maxSpeed: 0.5, maxRotation: 60,
                                    tooCloseText: "너무 가깝습니다 (%.2f m) — 35 cm 이상 떨어지세요",

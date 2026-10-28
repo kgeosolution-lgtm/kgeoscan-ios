@@ -288,6 +288,15 @@ struct PreviewView: View {
                     }
                 }
             } else {
+                if let area = meta.area {
+                    LabeledContent("방식", value: "면 촬영 (정사영상) · \(PreviewView.surfaceLabel(area.surface))")
+                    LabeledContent("고해상도 사진", value: "\(area.hires)장" + ((area.hiresSkipped ?? 0) > 0 ? " · 흔들려서 건너뜀 \(area.hiresSkipped ?? 0)회" : ""))
+                    if area.hires < 10 {
+                        Text("고해상도 사진이 적습니다 — 대상 면을 더 넓게, 천천히 지그재그로 훑으면 정사영상이 좋아집니다.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }
                 if let duration = meta.durationSeconds {
                     LabeledContent("녹화 시간", value: String(format: "%.0f초", duration))
                 }
@@ -327,11 +336,20 @@ struct PreviewView: View {
         }
     }
 
+    static func surfaceLabel(_ surface: String) -> String {
+        switch surface {
+        case "floor": return "바닥·트렌치"
+        case "wall": return "벽"
+        default: return "자동"
+        }
+    }
+
     /// 경고 샘플(10 Hz) 수를 '가까움 ≈3초' 형태로
     static func countsText(_ counts: [String: Int]) -> String {
         let labels: [(String, String)] = [
             ("tracking", "트래킹"), ("close", "가까움"), ("far", "멂"), ("no_depth", "깊이 없음"),
             ("fast", "빠름"), ("blur", "흐림"), ("low_confidence", "신뢰 낮음"), ("object", "물체 거리·회전"),
+            ("tilt", "기울기"),
         ]
         var parts: [String] = []
         for (key, label) in labels {

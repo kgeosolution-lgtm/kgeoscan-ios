@@ -14,8 +14,9 @@ struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.modeKey) private var modeRaw: String = ScanMode.home.rawValue
     @AppStorage(KgeoDefaults.locationSourceKey) private var locationSourceRaw: String = "gps"
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
-    @AppStorage(KgeoDefaults.objectModeKey) private var objectMode: Bool = true
     @AppStorage(KgeoDefaults.captureMethodKey) private var captureMethod: String = "objcap"
+    @AppStorage(KgeoDefaults.surveyStyleKey) private var surveyStyle: String = "object"
+    @AppStorage(KgeoDefaults.areaSurfaceKey) private var areaSurface: String = "auto"
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
@@ -39,13 +40,33 @@ struct ScanSetupView: View {
                 }
                 .pickerStyle(.segmented)
                 Text(modeRaw == ScanMode.survey.rawValue
-                     ? "현장조사: 물체에서 40~80 cm 떨어져 천천히 한 바퀴(20~30초). 반투명·광택 표면은 LiDAR 에 안 잡힙니다."
+                     ? "현장조사: 물체(360°), 면(정사영상 — 트렌치·벽 균열·바닥), 일반 영상 중에서 고릅니다. 반투명·광택 표면은 LiDAR 에 안 잡힙니다."
                      : "홈스캔: 벽과 바닥을 0.3~3 m 거리에서 천천히 훑습니다. 방 단위로 나눠 찍는 것이 좋습니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 if modeRaw == ScanMode.survey.rawValue {
-                    Toggle("물체 모드 (소형 물체 360° 촬영)", isOn: $objectMode)
-                    if objectMode {
+                    Picker("촬영 대상", selection: $surveyStyle) {
+                        Text("물체 360°").tag("object")
+                        Text("면 (정사영상)").tag("area")
+                        Text("일반").tag("plain")
+                    }
+                    .pickerStyle(.segmented)
+                    if surveyStyle == "area" {
+                        Picker("대상 면", selection: $areaSurface) {
+                            Text("바닥·트렌치").tag("floor")
+                            Text("벽").tag("wall")
+                            Text("자동").tag("auto")
+                        }
+                        .pickerStyle(.segmented)
+                        Text(areaDescription)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if surveyStyle == "plain" {
+                        Text("일반 영상: 물체 자르기나 정사영상 없이 LiDAR 영상·깊이만 기록합니다.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if surveyStyle == "object" {
                         if ObjcapSupport.isAvailable {
                             Picker("촬영 방식", selection: $captureMethod) {
                                 Text("고화질 사진").tag("objcap")
@@ -210,9 +231,15 @@ struct ScanSetupView: View {
                             mode: ScanMode(rawValue: modeRaw) ?? .home,
                             serverBase: endpoints.normalized)
         meta.locationSource = locationSourceRaw
-        meta.objectMode = (meta.mode == .survey) && objectMode
-        let useObjectCapture = meta.objectMode == true && captureMethod == "objcap" && ObjcapSupport.isAvailable
-        meta.capture = useObjectCapture ? "objcap" : "video"
+        let style = meta.mode == .survey ? surveyStyle : "plain"
+        meta.objectMode = style == "object"
+        if style == "area" {
+            meta.capture = "area"
+            meta.area = AreaInfo(surface: areaSurface, hires: 0)
+        } else {
+            let useObjectCapture = meta.objectMode == true && captureMethod == "objcap" && ObjcapSupport.isAvailable
+            meta.capture = useObjectCapture ? "objcap" : "video"
+        }
         if locationSourceRaw == "map" {
             guard let c = pickedCoordinate else {
                 validationMessage = "지도에서 스캔 위치를 찍어 주세요."
@@ -231,6 +258,18 @@ struct ScanSetupView: View {
         }
         validationMessage = nil
         onStart(meta)
+    }
+
+    private var areaDescription: String {
+        let common = " 녹화하는 동안 12 cm 움직이거나 10° 돌 때마다 고해상도 사진(최대 200장)이 자동으로 찍혀, 서버가 정사영상(위·정면에서 본 실측 사진)을 만듭니다. 대상에서 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요."
+        switch areaSurface {
+        case "floor":
+            return "바닥·트렌치: 폰을 아래로 향하게 기울여 위에서 내려다봅니다." + common
+        case "wall":
+            return "벽: 폰을 세워 벽을 정면으로 봅니다." + common
+        default:
+            return "자동: 방향 안내 없이 찍고 서버가 면을 찾습니다." + common
+        }
     }
 
     static func defaultTitle() -> String {

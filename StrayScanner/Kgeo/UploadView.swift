@@ -247,6 +247,11 @@ final class UploadViewModel: ObservableObject {
             body.addField("scan_type", meta.isObjcap ? ScanMode.survey.rawValue : meta.mode.rawValue)
             body.addField("client_id", meta.clientId ?? "")
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
+            if meta.capture == "area" {
+                // 면 촬영(정사영상): Stray 형식 + hires/ 고해상도 사진·hires/poses.json
+                body.addField("area_mode", "1")
+                body.addField("area_surface", meta.area?.surface ?? "auto")
+            }
             if meta.objectMode == true && !meta.isObjcap {
                 // 물체 모드: 서버가 obj_center 반경 obj_radius 안만 잘라 복원한다. 중심이 없으면 서버가 자동 계산
                 body.addField("object_mode", "1")
@@ -482,6 +487,9 @@ struct UploadView: View {
                 LabeledContent("모드", value: vm.meta.mode.label)
                 if let frames = vm.meta.savedFrames, let duration = vm.meta.durationSeconds {
                     LabeledContent("녹화", value: String(format: "%.0f초 · %d 프레임", duration, frames))
+                }
+                if let area = vm.meta.area {
+                    LabeledContent("면 촬영", value: "\(PreviewView.surfaceLabel(area.surface)) · 고해상도 \(area.hires)장")
                 }
                 if let info = vm.meta.objcap {
                     LabeledContent("사진", value: "\(info.images)장 · 폰 3D " + (info.reconstruction == "device" ? "완료" : "없음"))

@@ -78,6 +78,9 @@ struct SessionRow: View {
             if let images = meta.objcap?.images {
                 parts.append("사진 \(images)장")
             }
+            if let hires = meta.area?.hires {
+                parts.append("고해상도 \(hires)장")
+            }
         }
         return parts.joined(separator: " · ")
     }

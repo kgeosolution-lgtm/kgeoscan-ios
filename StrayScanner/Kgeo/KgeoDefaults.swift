@@ -43,6 +43,10 @@ enum KgeoDefaults {
     static let skipPreviewKey = "kgeo.skipPreview"
     /// 물체 모드 촬영 방식: objcap (고화질 사진, 기본) | video
     static let captureMethodKey = "kgeo.captureMethod"
+    /// 현장조사 촬영 대상: object (물체 360°) | area (면, 정사영상) | plain (일반 영상)
+    static let surveyStyleKey = "kgeo.surveyStyle"
+    /// 면 촬영 대상: floor | wall | auto
+    static let areaSurfaceKey = "kgeo.areaSurface"
 
     static var objectModeDefault: Bool {
         UserDefaults.standard.object(forKey: objectModeKey) == nil ? true : UserDefaults.standard.bool(forKey: objectModeKey)

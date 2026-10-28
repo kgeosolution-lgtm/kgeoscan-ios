@@ -29,6 +29,7 @@ import CoreData
 import CoreMotion
 import CoreImage
 import ImageIO
+import AVFoundation
 import simd
 
 let FpsDividers: [Int] = [1, 2, 4, 12, 60]
@@ -113,6 +114,22 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var lastKeyframeTime: TimeInterval = 0
     private var keyframeInterval: TimeInterval = 0.7
 
+    // 면 촬영 (정사영상): 녹화하면서 12 cm 이동·10° 회전마다 고해상도 정지 사진 (hires/)
+    private var areaMode = false
+    private var areaSurface = "auto"
+    private var hiresRecorder: HiresRecorder?
+    private var hiresAccepting = false
+    private var hiresInFlight = false
+    private var hiresCount = 0
+    private var hiresWritten = 0
+    private var hiresSkipped = 0
+    private var hiresFormatRecommended = false
+    private var lastHiresTransform: simd_float4x4?
+    private var lastHiresRequestTime: TimeInterval = 0
+    private var lastShakeSkipTime: TimeInterval = 0
+    private var lastGuidanceSpeed: Float = 0
+    private var lastGuidanceRotation: Float = 0
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -129,7 +146,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         self.dataContext = appDelegate.persistentContainer.newBackgroundContext()
 
         objectMode = scanMeta?.objectMode ?? false
-        if objectMode {
+        areaMode = scanMeta?.capture == "area"
+        areaSurface = scanMeta?.area?.surface ?? "auto"
+        if areaMode {
+            guide.thresholds = CaptureGuide.area
+        } else if objectMode {
             guide.thresholds = CaptureGuide.object
         } else {
             guide.thresholds = (scanMeta?.mode ?? .home) == .survey ? CaptureGuide.survey : CaptureGuide.home
@@ -217,7 +238,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         statsLabel.text = "0 프레임 · ≈0 MB"
         statsLabel.isHidden = true
         guideLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-        guideLabel.numberOfLines = 2
+        guideLabel.numberOfLines = 3
         guideLabel.isHidden = true
 
         styleButton(overlayButton, title: "메시 켜짐")
@@ -322,6 +343,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 overlayButton.isHidden = true
             }
             config.planeDetection = objectMode ? [.horizontal, .vertical] : []
+            if areaMode {
+                preferHighResolutionStillFormat(config)
+            }
             guide.reset()
             session.run(config)
             scheduleExposureApply()
@@ -411,6 +435,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting])
         statsLabel.isHidden = false
+        hiresRecorder = nil
+        hiresAccepting = false
+        hiresInFlight = false
+        hiresCount = 0
+        hiresWritten = 0
+        hiresSkipped = 0
+        lastHiresTransform = nil
+        lastHiresRequestTime = 0
+        if areaMode, let encoder = datasetEncoder {
+            hiresRecorder = try? HiresRecorder(datasetDirectory: encoder.directory.absoluteURL.standardizedFileURL)
+            hiresAccepting = hiresRecorder != nil
+        }
         if objectMode && worldFrameFixed {
             // 물체 지정 때 이미 원점을 잡았다 — 리셋하면 물체 좌표가 어긋나므로 그대로 녹화한다
             awaitingTracking = false
@@ -463,6 +499,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         startedRecording = nil
         awaitingTracking = false
+        hiresAccepting = false
         updateLabelTimer?.invalidate()
         updateLabelTimer = nil
         statsLabel.isHidden = true
@@ -494,6 +531,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 }
                 // 품질 판단(다시 찍기)은 미리보기 화면에서 한다. 미리보기용 ARKit 메시는 지금 복사해 둔다
                 let mesh = meshSupported ? MeshSnapshot.capture(from: session.currentFrame) : nil
+                // 면 촬영: 남은 고해상도 사진 저장을 기다리고 hires/poses.json 을 쓴다
+                hiresWritten = hiresRecorder?.finish(surface: areaSurface, formatRecommended: hiresFormatRecommended) ?? 0
+                hiresRecorder = nil
                 finishRecording(started: started, encoder: encoder, directory: directory, stats: stats, mesh: mesh)
             case .videoEncodingError, .directoryCreationError:
                 showError(message: "영상 인코딩 중 오류가 났습니다. 다시 녹화해 주세요.")
@@ -548,7 +588,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         meta.systemVersion = UIDevice.current.systemVersion
         meta.fix = geoFix
         meta.exposureMode = ExposureController.currentMode.rawValue
-        meta.capture = "video"
+        if areaMode {
+            meta.capture = "area"
+            meta.area = AreaInfo(surface: areaSurface, hires: hiresWritten, hiresSkipped: hiresSkipped,
+                                 hiresFormatRecommended: hiresFormatRecommended)
+        } else {
+            meta.capture = "video"
+        }
         meta.meshOverlay = meshSupported
         meta.captureStats = stats
         meta.folderBytes = RecordSessionViewController.folderSize(directory)
@@ -603,8 +649,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         self.timeLabel.text = String(format: "%02d:%02d:%02d", hours, minutes, roundSeconds)
         if let encoder = datasetEncoder {
             let frames = encoder.savedFrameCount
-            let megabytes = Double(Int64(frames) * KgeoDefaults.bytesPerFrameEstimate) / 1_048_576
-            statsLabel.text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
+            var megabytes = Double(Int64(frames) * KgeoDefaults.bytesPerFrameEstimate) / 1_048_576
+            if areaMode {
+                megabytes += Double(hiresCount) * 3.5
+                statsLabel.text = String(format: "%d 프레임 · 고해상도 %d장 · ≈%.0f MB", frames, hiresCount, megabytes)
+            } else {
+                statsLabel.text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
+            }
         }
     }
 
@@ -799,6 +850,101 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         encoder.add(frame: frame)
         considerThumbnail(frame: frame, directory: encoder.directory.absoluteURL.standardizedFileURL)
         considerColorKeyframe(frame: frame)
+        considerHighResolution(frame: frame)
+    }
+
+    // MARK: - 면 촬영 (정사영상)
+
+    /// 고해상도 정지 사진에 맞는 영상 형식으로 바꾼다 — 녹화 해상도·프레임 수·카메라가 같은 형식만 (Stray rgb.mp4 형식 유지)
+    private func preferHighResolutionStillFormat(_ config: ARWorldTrackingConfiguration) {
+        let current = config.videoFormat
+        if current.isRecommendedForHighResolutionFrameCapturing {
+            hiresFormatRecommended = true
+            return
+        }
+        let match = ARWorldTrackingConfiguration.supportedVideoFormats.first { format in
+            format.isRecommendedForHighResolutionFrameCapturing
+                && format.imageResolution == current.imageResolution
+                && format.framesPerSecond == current.framesPerSecond
+                && format.captureDeviceType == current.captureDeviceType
+        }
+        if let format = match {
+            config.videoFormat = format
+            hiresFormatRecommended = true
+        } else {
+            hiresFormatRecommended = false
+        }
+    }
+
+    /// 마지막 사진 대비 12 cm 이동 또는 10° 회전이면 고해상도 정지 사진 요청 (흔들리면 건너뜀, 최대 200장)
+    private func considerHighResolution(frame: ARFrame) {
+        guard areaMode, hiresAccepting, !hiresInFlight, hiresCount < HiresRecorder.maxShots else { return }
+        guard case .normal = frame.camera.trackingState else { return }
+        guard frame.timestamp - lastHiresRequestTime >= 0.4 else { return }
+        let transform = frame.camera.transform
+        if let last = lastHiresTransform {
+            let moved = simd_distance(transform.columns.3, last.columns.3)
+            let delta = simd_quatf(transform) * simd_quatf(last).inverse
+            var turned = delta.angle * 180 / Float.pi
+            if turned > 180 {
+                turned = 360 - turned
+            }
+            guard moved >= 0.12 || turned >= 10 else { return }
+        }
+        if lastGuidanceSpeed > 0.5 || lastGuidanceRotation > 45 {
+            if frame.timestamp - lastShakeSkipTime >= 1 {
+                lastShakeSkipTime = frame.timestamp
+                hiresSkipped += 1
+            }
+            return
+        }
+        hiresInFlight = true
+        lastHiresRequestTime = frame.timestamp
+        session.captureHighResolutionFrame { [weak self] hiresFrame, error in
+            DispatchQueue.main.async {
+                self?.handleHighResolution(hiresFrame, error: error)
+            }
+        }
+    }
+
+    private func handleHighResolution(_ frame: ARFrame?, error: Error?) {
+        hiresInFlight = false
+        guard hiresAccepting, let recorder = hiresRecorder else { return }
+        guard let frame = frame else {
+            if let error = error {
+                print("고해상도 사진 실패: \(error.localizedDescription)")
+            }
+            return
+        }
+        hiresCount += 1
+        lastHiresTransform = frame.camera.transform
+        recorder.add(frame: frame, index: hiresCount)
+    }
+
+    /// 바닥 모드: 폰이 아래를 보는지, 벽 모드: 수평을 보는지
+    private func tiltWarning(frame: ARFrame) -> String? {
+        // 카메라 정면(-z)의 월드 y 성분 (-1 = 바로 아래)
+        let forwardY = -frame.camera.transform.columns.2.y
+        switch areaSurface {
+        case "floor":
+            return forwardY > -0.8 ? "폰을 더 아래로 기울여 바닥(트렌치)을 위에서 내려다보세요" : nil
+        case "wall":
+            return abs(forwardY) > 0.5 ? "벽을 정면으로 보도록 폰을 세우세요" : nil
+        default:
+            return nil
+        }
+    }
+
+    private func areaHint() -> String {
+        let count = hiresCount > 0 ? " · 고해상도 \(hiresCount)장" : ""
+        switch areaSurface {
+        case "floor":
+            return "폰을 아래로 향해 바닥(트렌치)을 내려다보며 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요" + count
+        case "wall":
+            return "벽을 정면으로 보며 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요" + count
+        default:
+            return "대상 면에서 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요" + count
+        }
     }
 
     /// 미리보기 정점 색용 키프레임 (트래킹 정상일 때만)
@@ -845,6 +991,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func updateGuidance(frame: ARFrame, capturing: Bool) {
         let guidance = guide.evaluate(frame: frame, recording: capturing)
+        lastGuidanceSpeed = guidance.speed
+        lastGuidanceRotation = guidance.rotationSpeed
         var trackingText = guidance.trackingText
         if objectMode, objectTracker.isSet {
             trackingText += String(format: " · 물체 %.2f m", objectTracker.distance)
@@ -866,6 +1014,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if capturing {
                 guide.countWarning("object")
             }
+        } else if areaMode, let tilt = tiltWarning(frame: frame) {
+            text = tilt
+            if capturing {
+                guide.countWarning("tilt")
+            }
         } else {
             text = guidance.warning
         }
@@ -873,6 +1026,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if text == nil {
             if objectMode {
                 text = objectTracker.hint(recording: startedRecording != nil)
+            } else if areaMode {
+                text = areaHint()
             } else {
                 // 모드 힌트: 녹화 전, 그리고 녹화 시작 8초 동안
                 let showHint: Bool
