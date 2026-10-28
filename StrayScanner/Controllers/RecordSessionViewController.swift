@@ -114,6 +114,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var lastKeyframeTime: TimeInterval = 0
     private var keyframeInterval: TimeInterval = 0.7
 
+    // 촘촘한 색 점 미리보기: 0.25초마다(또는 8 cm·8° 움직이면) 깊이를 역투영해 복셀 평균
+    private var pointAccumulator: PointCloudAccumulator?
+    private var lastPointSampleTime: TimeInterval = 0
+    private var lastPointSampleTransform: simd_float4x4?
+    private var firstPointTransform: simd_float4x4?
+
     // 면 촬영 (정사영상): 녹화하면서 12 cm 이동·10° 회전마다 고해상도 정지 사진 (hires/)
     private var areaMode = false
     private var areaSurface = "auto"
@@ -452,6 +458,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         colorKeyframes = []
         lastKeyframeTime = 0
         keyframeInterval = 0.7
+        pointAccumulator = PointCloudAccumulator(voxelSize: objectMode ? 0.003 : 0.01)
+        lastPointSampleTime = 0
+        lastPointSampleTransform = nil
+        firstPointTransform = nil
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
@@ -552,6 +562,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if encoder.savedFrameCount == 0 {
             try? FileManager.default.removeItem(at: directory)
             datasetEncoder = nil
+            pointAccumulator = nil
             showError(message: "녹화된 프레임이 없습니다. 트래킹이 잡힌 뒤 조금 더 길게 녹화해 주세요.", popOnDismiss: false)
             return
         }
@@ -583,6 +594,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                                  mesh: MeshSnapshot?) {
         saveRecording(started, encoder)
         writeMeta(started: started, encoder: encoder, directory: directory, stats: stats)
+        if let accumulator = pointAccumulator {
+            var pointCrop: PreviewCrop?
+            if objectMode, let center = objectTracker.center {
+                pointCrop = PreviewCrop(center: center, radius: objectTracker.radius)
+            }
+            PreviewBuilder.shared.startPoints(directory: directory, accumulator: accumulator, crop: pointCrop,
+                                              start: firstPointTransform)
+        }
+        pointAccumulator = nil
         if let mesh = mesh {
             var crop: PreviewCrop?
             if objectMode, let center = objectTracker.center {
@@ -904,7 +924,39 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         encoder.add(frame: frame)
         considerThumbnail(frame: frame, directory: encoder.directory.absoluteURL.standardizedFileURL)
         considerColorKeyframe(frame: frame)
+        considerPointSample(frame: frame)
         considerHighResolution(frame: frame)
+    }
+
+    /// 색 점 미리보기 샘플: 0.25초마다, 또는 8 cm 이동·8° 회전 때 (최소 0.1초 간격, 앞 샘플을 합치는 중이면 건너뜀)
+    private func considerPointSample(frame: ARFrame) {
+        guard let accumulator = pointAccumulator, frame.sceneDepth != nil else { return }
+        guard case .normal = frame.camera.trackingState else { return }
+        let elapsed = frame.timestamp - lastPointSampleTime
+        guard elapsed >= 0.1 else { return }
+        let transform = frame.camera.transform
+        var due = elapsed >= 0.25
+        if !due, let last = lastPointSampleTransform {
+            let moved = simd_distance(transform.columns.3, last.columns.3)
+            let delta = simd_quatf(transform) * simd_quatf(last).inverse
+            var turned = delta.angle * 180 / Float.pi
+            if turned > 180 {
+                turned = 360 - turned
+            }
+            due = moved >= 0.08 || turned >= 8
+        }
+        guard due else { return }
+        var crop: PreviewCrop?
+        if objectMode, let center = objectTracker.center {
+            crop = PreviewCrop(center: center, radius: objectTracker.radius)
+        }
+        if accumulator.add(frame: frame, crop: crop) {
+            lastPointSampleTime = frame.timestamp
+            lastPointSampleTransform = transform
+            if firstPointTransform == nil {
+                firstPointTransform = transform
+            }
+        }
     }
 
     // MARK: - 면 촬영 (정사영상)

@@ -52,7 +52,12 @@ struct PreviewSceneView: UIViewRepresentable {
         camera.fieldOfView = 50
         let cameraNode = SCNNode()
         cameraNode.camera = camera
-        cameraNode.position = SCNVector3(center.x, center.y + radius * 0.8, center.z + radius * 2.6)
+        if let eye = result.eye {
+            // 색 점: 녹화를 시작한 자리에서 바라본다
+            cameraNode.position = eye
+        } else {
+            cameraNode.position = SCNVector3(center.x, center.y + radius * 0.8, center.z + radius * 2.6)
+        }
         cameraNode.look(at: center)
         result.scene.rootNode.addChildNode(cameraNode)
         view.pointOfView = cameraNode
@@ -75,16 +80,24 @@ struct PreviewSceneView: UIViewRepresentable {
 
 final class PreviewViewModel: ObservableObject {
     @Published var meta: ScanMeta?
-    @Published var sceneResult: PreviewSceneResult?
-    @Published var loading = false
-    @Published var noPreviewReason: String?
+    /// 색 점 미리보기 (영상 녹화의 기본)
+    @Published var points: PreviewSceneResult?
+    @Published var loadingPoints = false
+    @Published var pointsReason: String?
+    /// 메시 미리보기 또는 Object Capture 모델
+    @Published var model: PreviewSceneResult?
+    @Published var loadingModel = false
+    @Published var modelReason: String?
     @Published var uploadBytes: Int64 = 0
     /// nil = 아직 모름
     @Published var onWifi: Bool?
 
     let directory: URL
     private let monitor = NWPathMonitor()
-    private var waitingForBuild = false
+    private var waitingForPoints = false
+    private var waitingForMesh = false
+
+    var isObjcap: Bool { meta?.isObjcap == true }
 
     init(directory: URL) {
         self.directory = directory
@@ -103,8 +116,8 @@ final class PreviewViewModel: ObservableObject {
         monitor.cancel()
     }
 
-    /// 메인 스레드에서 부른다
-    func load(force: Bool = false) {
+    /// 메인 스레드에서 부른다: 메타·업로드 크기, 그리고 기본 미리보기(영상은 색 점, Object Capture 는 모델)
+    func load() {
         meta = ScanMeta.load(from: directory)
         let dir = directory
         DispatchQueue.global(qos: .utility).async {
@@ -113,36 +126,79 @@ final class PreviewViewModel: ObservableObject {
                 self.uploadBytes = bytes
             }
         }
-        if PreviewBuilder.shared.isBuilding(dir) {
-            waitingForBuild = true
+        if isObjcap {
+            loadModel()
+        } else {
+            loadPoints()
+        }
+    }
+
+    /// 메인 스레드에서 부른다
+    func loadPoints(force: Bool = false) {
+        let dir = directory
+        if PreviewBuilder.shared.isBuildingPoints(dir) {
+            waitingForPoints = true
             return
         }
-        guard force || (sceneResult == nil && !loading && noPreviewReason == nil) else { return }
-        loading = true
+        guard force || (points == nil && !loadingPoints && pointsReason == nil) else { return }
+        loadingPoints = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            var result: PreviewSceneResult?
+            var reason: String?
+            do {
+                result = try PreviewSceneLoader.loadPoints(directory: dir)
+                if result == nil {
+                    reason = "이 녹화에는 색 점 미리보기가 없습니다 (이 기능 이전 녹화). 위에서 '메시' 로 바꿔 보세요."
+                }
+            } catch {
+                reason = "미리보기를 열 수 없습니다: \(error.localizedDescription)"
+            }
+            DispatchQueue.main.async {
+                self.loadingPoints = false
+                self.points = result
+                self.pointsReason = reason
+            }
+        }
+    }
+
+    /// 메인 스레드에서 부른다: Object Capture 모델 또는 ARKit 메시 미리보기
+    func loadModel(force: Bool = false) {
+        let dir = directory
+        if !isObjcap && PreviewBuilder.shared.isBuilding(dir) {
+            waitingForMesh = true
+            return
+        }
+        guard force || (model == nil && !loadingModel && modelReason == nil) else { return }
+        loadingModel = true
         DispatchQueue.global(qos: .userInitiated).async {
             var result: PreviewSceneResult?
             var reason: String?
             do {
                 result = try PreviewSceneLoader.load(directory: dir)
                 if result == nil {
-                    reason = "이 녹화에는 3D 미리보기가 없습니다 (미리보기 기능 이전 녹화이거나 스캔된 면이 없음)"
+                    reason = "이 녹화에는 메시 미리보기가 없습니다 (스캔된 면이 없거나 이 기능 이전 녹화)"
                 }
             } catch {
                 reason = "미리보기를 열 수 없습니다: \(error.localizedDescription)"
             }
             DispatchQueue.main.async {
-                self.loading = false
-                self.sceneResult = result
-                self.noPreviewReason = reason
+                self.loadingModel = false
+                self.model = result
+                self.modelReason = reason
             }
         }
     }
 
-    /// 미리보기 생성이 끝났을 때 (메인 스레드)
+    /// 미리보기 저장이 끝났을 때 (메인 스레드)
     func buildFinished() {
-        guard waitingForBuild else { return }
-        waitingForBuild = false
-        load(force: true)
+        if waitingForPoints && !PreviewBuilder.shared.isBuildingPoints(directory) {
+            waitingForPoints = false
+            loadPoints(force: true)
+        }
+        if waitingForMesh && !PreviewBuilder.shared.isBuilding(directory) {
+            waitingForMesh = false
+            loadModel(force: true)
+        }
     }
 }
 
@@ -156,6 +212,8 @@ struct PreviewView: View {
     @ObservedObject private var builder = PreviewBuilder.shared
     @AppStorage(KgeoDefaults.skipPreviewKey) private var skipPreview: Bool = false
     @State private var confirmRetake = false
+    /// 영상 녹화: false = 색 점(기본), true = 메시
+    @State private var showMesh = false
     let context: Context
     let onUpload: (() -> Void)?
     let onRetake: ((ScanMeta) -> Void)?
@@ -175,13 +233,18 @@ struct PreviewView: View {
     var body: some View {
         Form {
             Section {
+                if !vm.isObjcap {
+                    Picker("표시", selection: $showMesh) {
+                        Text("색 점").tag(false)
+                        Text("메시").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                }
                 viewer
-                    .frame(height: 340)
+                    .frame(height: 360)
                     .listRowInsets(EdgeInsets())
-                if let result = vm.sceneResult {
-                    Text(result.triangles > 0
-                         ? "\(result.kind) · 삼각형 \(result.triangles) — 한 손가락으로 돌리고 두 손가락으로 확대"
-                         : "\(result.kind) — 한 손가락으로 돌리고 두 손가락으로 확대")
+                if let text = caption {
+                    Text(text)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -234,6 +297,18 @@ struct PreviewView: View {
                 vm.buildFinished()
             }
         }
+        .onReceive(builder.$pointsProgress) { progress in
+            if progress[key] == nil {
+                vm.buildFinished()
+            }
+        }
+        .onChange(of: showMesh) { mesh in
+            if mesh {
+                vm.loadModel()
+            } else {
+                vm.loadPoints()
+            }
+        }
         .confirmationDialog("이 녹화를 지우고 같은 설정으로 다시 찍을까요?", isPresented: $confirmRetake,
                             titleVisibility: .visible) {
             Button("지우고 다시 찍기", role: .destructive) {
@@ -248,27 +323,74 @@ struct PreviewView: View {
 
     @ViewBuilder
     private var viewer: some View {
-        if let fraction = builder.progress[key] {
+        if vm.isObjcap || showMesh {
+            modelViewer
+        } else {
+            pointsViewer
+        }
+    }
+
+    @ViewBuilder
+    private var pointsViewer: some View {
+        if builder.pointsProgress[key] != nil {
             VStack(spacing: 10) {
-                ProgressView(value: fraction)
-                Text(String(format: "3D 미리보기 만드는 중 %.0f%%", fraction * 100))
+                ProgressView()
+                Text("색 점 미리보기 만드는 중…")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             .padding(24)
-        } else if let result = vm.sceneResult {
+        } else if let result = vm.points {
             PreviewSceneView(result: result)
-        } else if vm.loading {
+        } else if vm.loadingPoints {
             ProgressView("미리보기 여는 중…")
-        } else if let failure = builder.failures[key] {
-            Text("미리보기를 만들지 못했습니다: \(failure)")
+        } else if let failure = builder.pointsFailures[key] {
+            Text("색 점 미리보기를 만들지 못했습니다: \(failure)")
                 .foregroundColor(.secondary)
                 .padding()
         } else {
-            Text(vm.noPreviewReason ?? "미리보기 없음")
+            Text(vm.pointsReason ?? "미리보기 없음")
                 .foregroundColor(.secondary)
                 .padding()
         }
+    }
+
+    @ViewBuilder
+    private var modelViewer: some View {
+        if !vm.isObjcap, let fraction = builder.progress[key] {
+            VStack(spacing: 10) {
+                ProgressView(value: fraction)
+                Text(String(format: "메시 미리보기 만드는 중 %.0f%%", fraction * 100))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(24)
+        } else if let result = vm.model {
+            PreviewSceneView(result: result)
+        } else if vm.loadingModel {
+            ProgressView("미리보기 여는 중…")
+        } else if let failure = builder.failures[key] {
+            Text("메시 미리보기를 만들지 못했습니다: \(failure)")
+                .foregroundColor(.secondary)
+                .padding()
+        } else {
+            Text(vm.modelReason ?? "미리보기 없음")
+                .foregroundColor(.secondary)
+                .padding()
+        }
+    }
+
+    private var caption: String? {
+        let shown = (vm.isObjcap || showMesh) ? vm.model : vm.points
+        guard let result = shown else { return nil }
+        var parts = [result.kind]
+        if result.pointCount > 0 {
+            parts.append("점 \(result.pointCount)")
+        }
+        if result.triangles > 0 {
+            parts.append("삼각형 \(result.triangles)")
+        }
+        return parts.joined(separator: " · ") + " — 한 손가락으로 돌리고 두 손가락으로 확대"
     }
 
     @ViewBuilder
@@ -288,6 +410,9 @@ struct PreviewView: View {
                     }
                 }
             } else {
+                if let count = vm.points?.pointCount {
+                    LabeledContent("색 점", value: "\(count)")
+                }
                 if let area = meta.area {
                     LabeledContent("방식", value: "면 촬영 (정사영상) · \(PreviewView.surfaceLabel(area.surface))")
                     if let source = area.hiresSource {
