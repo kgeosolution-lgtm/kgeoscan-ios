@@ -35,7 +35,11 @@ class OdometryEncoder {
     var transforms: [simd_float4x4] = []
     let fileHandle: FileHandle
     
-    init(url: URL) {
+    /// kgeoScan: rgb.mp4 를 촬영 해상도보다 줄여 녹화할 때 fx, fy, cx, cy 에 곱하는 비율 (기본 1 = 원본과 같음)
+    let intrinsicsScale: Float
+
+    init(url: URL, intrinsicsScale: Float = 1) {
+        self.intrinsicsScale = intrinsicsScale
         self.path = url
         do {
             try "".write(to: self.path, atomically: true, encoding: .utf8)
@@ -57,10 +61,10 @@ class OdometryEncoder {
         let frameNumber = String(format: "%06d", currentFrame)
 
         let intrinsics = frame.camera.intrinsics
-        let fx = intrinsics.columns.0.x
-        let fy = intrinsics.columns.1.y
-        let cx = intrinsics.columns.2.x
-        let cy = intrinsics.columns.2.y
+        let fx = intrinsics.columns.0.x * intrinsicsScale
+        let fy = intrinsics.columns.1.y * intrinsicsScale
+        let cx = intrinsics.columns.2.x * intrinsicsScale
+        let cy = intrinsics.columns.2.y * intrinsicsScale
 
         let distortionCenter = frame.capturedDepthData?.cameraCalibrationData?.lensDistortionCenter
         let dcx = distortionCenter.map { "\($0.x)" } ?? ""

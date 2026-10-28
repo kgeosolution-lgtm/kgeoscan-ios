@@ -66,6 +66,15 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   안내: 대상 면까지 0.4~1.2 m, 0.4 m/s 이하, '천천히 지그재그로 겹치게', 바닥 모드는 폰이 아래를 보도록(정면 방향과 연직 37° 이내),
   벽 모드는 수평으로 보도록. 화면에 고해상도 장수 표시. `meta.json`: `capture:"area"`, `area:{surface, hires, hires_skipped, hires_format_recommended}`.
   업로드 필드: `mode=stray` + `area_mode=1` + `area_surface=floor|wall|auto`.
+  **무음 정지 사진 (기본, 2026-10-28)**: 한국판 아이폰은 `captureHighResolutionFrame` 마다 셔터음이 강제돼서, 면 촬영은 기본으로
+  높은 해상도 AR 영상 형식에서 그 순간의 `ARFrame.capturedImage` 를 정지 사진으로 저장한다(픽셀은 바로 복사해 ARKit 버퍼를 붙잡지 않고,
+  JPEG 0.9 저장은 백그라운드). 형식 고르기([VideoFormats.swift](StrayScanner/Kgeo/VideoFormats.swift)): 1순위 4:3·가로 3000 px 이상(30 fps·광각 우선),
+  2순위 16:9 4K(`recommendedVideoFormatFor4KResolution`). 녹화 화면을 열 때 후보를 하나씩 켜서 첫 프레임에 `sceneDepth` 가 오고
+  깊이 맵과 RGB 의 가로세로 비율이 같을 때만 채택하고(결과는 기기별로 저장), 없으면 기본 형식 + 셔터음 방식으로 되돌린다.
+  이때 `rgb.mp4` 는 VideoToolbox 로 가로 1920(4:3 이면 1920×1440)으로 줄여 녹화하고 `odometry.csv`·`camera_matrix.csv` 의 fx, fy, cx, cy 도
+  같은 비율로 환산한다(기본 형식에서는 원본과 같음). `hires/poses.json` 의 K 는 그 프레임의 `camera.intrinsics`(`intrinsics_source: "arframe"`),
+  JPEG EXIF 에는 `ARFrame.exifData`(초점거리 등)와 Make/Model, Orientation 1. `meta.json` area 에 `hires_source`(video_frame|high_res_capture),
+  `hires_format`("3840x2880@30" 등), `video_size`. 설정 → 면 촬영 사진(무음/셔터음), '카메라 형식 진단' 에서 이 기기 형식 표와 깊이 시험 결과를 복사할 수 있다.
 - **목록·설정**: 썸네일(녹화 중 가장 선명한 프레임 `thumb.jpg`), 용량, 배지(미업로드/업로드 중/처리 중/완료/실패), 스와이프 삭제.
   설정(톱니): 서버 주소, 기본 스캔 유형·위치 입력, 녹화 뒤 자동 업로드, Wi-Fi 에서만 업로드, 백그라운드 전송(실험), 노출.
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,

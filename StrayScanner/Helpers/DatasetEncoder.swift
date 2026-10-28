@@ -37,6 +37,8 @@ class DatasetEncoder {
     public let odometryPath: URL
     public let imuPath: URL
     public var status = Status.allGood
+    /// kgeoScan: rgb.mp4 해상도 / 촬영 해상도 (내부 파라미터 환산 비율, 기본 1)
+    public let intrinsicsScale: Float
     /// kgeoScan: 녹화 폴더 (문서 폴더 기준 상대 URL)
     public var directory: URL { datasetDirectory }
     /// kgeoScan: 저장된 프레임 수
@@ -47,12 +49,16 @@ class DatasetEncoder {
     private var latestGyroscopeData: (timestamp: Double, data: simd_double3)?
 
 
-    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1) {
+    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1, outputVideoSize: CGSize? = nil) {
         self.frameInterval = fpsDivider
         self.queue = DispatchQueue(label: "encoderQueue")
-        
-        let width = arConfiguration.videoFormat.imageResolution.width
-        let height = arConfiguration.videoFormat.imageResolution.height
+
+        // kgeoScan: 높은 해상도 영상 형식(면 촬영 무음 정지 사진)에서는 rgb.mp4 를 outputVideoSize 로 줄여 녹화하고,
+        // odometry.csv · camera_matrix.csv 의 내부 파라미터도 같은 비율로 환산한다. 기본(nil)은 원본과 같다.
+        let captureWidth = arConfiguration.videoFormat.imageResolution.width
+        let width = outputVideoSize?.width ?? captureWidth
+        let height = outputVideoSize?.height ?? arConfiguration.videoFormat.imageResolution.height
+        self.intrinsicsScale = captureWidth > 0 ? Float(width / captureWidth) : 1
         var theId: UUID = UUID()
         datasetDirectory = DatasetEncoder.createDirectory(id: &theId)
         self.id = theId
@@ -64,7 +70,7 @@ class DatasetEncoder {
         self.confidenceEncoder = ConfidenceEncoder(outDirectory: confidenceFilePath)
         self.cameraMatrixPath = datasetDirectory.appendingPathComponent("camera_matrix.csv", isDirectory: false)
         self.odometryPath = datasetDirectory.appendingPathComponent("odometry.csv", isDirectory: false)
-        self.odometryEncoder = OdometryEncoder(url: self.odometryPath)
+        self.odometryEncoder = OdometryEncoder(url: self.odometryPath, intrinsicsScale: self.intrinsicsScale)
         self.imuPath = datasetDirectory.appendingPathComponent("imu.csv", isDirectory: false)
         self.imuEncoder = IMUEncoder(url: self.imuPath)
         self.distortionEncoder = DistortionEncoder(datasetDirectory: datasetDirectory)
@@ -168,7 +174,13 @@ class DatasetEncoder {
     }
 
     private func writeIntrinsics() {
-        if let cameraMatrix = lastFrame?.camera.intrinsics {
+        if var cameraMatrix = lastFrame?.camera.intrinsics {
+            if intrinsicsScale != 1 {
+                cameraMatrix.columns.0.x *= intrinsicsScale
+                cameraMatrix.columns.1.y *= intrinsicsScale
+                cameraMatrix.columns.2.x *= intrinsicsScale
+                cameraMatrix.columns.2.y *= intrinsicsScale
+            }
             let rows = cameraMatrix.transpose.columns
             var csv: [String] = []
             for row in [rows.0, rows.1, rows.2] {

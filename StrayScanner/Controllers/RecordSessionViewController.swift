@@ -124,6 +124,22 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var hiresWritten = 0
     private var hiresSkipped = 0
     private var hiresFormatRecommended = false
+    /// 정지 사진 출처: 영상 프레임(무음) | captureHighResolutionFrame(셔터음)
+    private enum HiresSource {
+        case videoFrame
+        case highResCapture
+    }
+    private var hiresSource: HiresSource = .highResCapture
+    private var hiresFormatLabel = ""
+    private var defaultVideoFormat: ARConfiguration.VideoFormat?
+    /// 면 촬영 무음: 시험할 후보 형식과 지금 시험 중인 형식
+    private var formatCandidates: [ARConfiguration.VideoFormat] = []
+    private var testingFormat: ARConfiguration.VideoFormat?
+    private var formatTestStarted = Date()
+    /// 형식 시험이 끝나 녹화를 시작해도 되는지
+    private var formatReady = true
+    /// rgb.mp4 크기
+    private var recordVideoSize: CGSize = .zero
     private var lastHiresTransform: simd_float4x4?
     private var lastHiresRequestTime: TimeInterval = 0
     private var lastShakeSkipTime: TimeInterval = 0
@@ -345,11 +361,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 overlayButton.isHidden = true
             }
             config.planeDetection = objectMode ? [.horizontal, .vertical] : []
-            if areaMode {
-                preferHighResolutionStillFormat(config)
-            }
+            defaultVideoFormat = config.videoFormat
             guide.reset()
-            session.run(config)
+            if areaMode && areaSilentRequested {
+                // 무음 정지 사진: 높은 해상도 형식을 하나씩 켜서 깊이·비율을 확인한 뒤 고른다
+                beginSilentFormatSearch(config)
+            } else {
+                if areaMode {
+                    useShutterStills(config)
+                }
+                session.run(config)
+            }
             scheduleExposureApply()
         }
     }
@@ -435,7 +457,20 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             self.updateTime()
         }
-        datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting])
+        // 무음 면 촬영으로 높은 해상도 형식이면 rgb.mp4 는 가로 1920 으로 줄여 녹화 (내부 파라미터도 환산)
+        let captureSize = config.videoFormat.imageResolution
+        var outputSize: CGSize?
+        if areaMode && hiresSource == .videoFrame && captureSize.width > 1920 {
+            let scale = 1920 / captureSize.width
+            var scaledHeight = (captureSize.height * scale).rounded()
+            if Int(scaledHeight) % 2 == 1 {
+                scaledHeight -= 1
+            }
+            outputSize = CGSize(width: 1920, height: scaledHeight)
+        }
+        recordVideoSize = outputSize ?? captureSize
+        datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting],
+                                        outputVideoSize: outputSize)
         statsLabel.isHidden = false
         hiresRecorder = nil
         hiresAccepting = false
@@ -534,7 +569,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 // 품질 판단(다시 찍기)은 미리보기 화면에서 한다. 미리보기용 ARKit 메시는 지금 복사해 둔다
                 let mesh = meshSupported ? MeshSnapshot.capture(from: session.currentFrame) : nil
                 // 면 촬영: 남은 고해상도 사진 저장을 기다리고 hires/poses.json 을 쓴다
-                hiresWritten = hiresRecorder?.finish(surface: areaSurface, formatRecommended: hiresFormatRecommended) ?? 0
+                hiresWritten = hiresRecorder?.finish(surface: areaSurface, formatRecommended: hiresFormatRecommended,
+                                                     source: hiresSourceName, format: hiresFormatLabel,
+                                                     videoSize: videoSizeText) ?? 0
                 hiresRecorder = nil
                 finishRecording(started: started, encoder: encoder, directory: directory, stats: stats, mesh: mesh)
             case .videoEncodingError, .directoryCreationError:
@@ -593,7 +630,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if areaMode {
             meta.capture = "area"
             meta.area = AreaInfo(surface: areaSurface, hires: hiresWritten, hiresSkipped: hiresSkipped,
-                                 hiresFormatRecommended: hiresFormatRecommended)
+                                 hiresFormatRecommended: hiresFormatRecommended, hiresSource: hiresSourceName,
+                                 hiresFormat: hiresFormatLabel, videoSize: videoSizeText)
         } else {
             meta.capture = "video"
         }
@@ -813,10 +851,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         frameCounter += 1
+        if !formatReady {
+            checkSilentFormat(frame: frame)
+            if frameCounter % 6 == 0 {
+                updateGuidance(frame: frame, capturing: false)
+            }
+            return
+        }
         if !intrinsicsChecked, case .normal = frame.camera.trackingState {
             intrinsicsChecked = true
-            if CameraIntrinsics.cached() == nil,
-               arConfiguration?.videoFormat.captureDeviceType == .builtInWideAngleCamera {
+            if CameraIntrinsics.cached() == nil, let format = arConfiguration?.videoFormat,
+               format.captureDeviceType == .builtInWideAngleCamera, FormatCatalog.isFourThree(format) {
                 CameraIntrinsics.store(CameraIntrinsics(frame: frame))
             }
         }
@@ -907,8 +952,16 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             }
             return
         }
-        hiresInFlight = true
         lastHiresRequestTime = frame.timestamp
+        if hiresSource == .videoFrame {
+            // 무음: 이 영상 프레임을 그대로 정지 사진으로 (픽셀은 바로 복사, 저장은 백그라운드)
+            guard let recorder = hiresRecorder else { return }
+            hiresCount += 1
+            lastHiresTransform = transform
+            recorder.add(frame: frame, index: hiresCount, source: "video_frame")
+            return
+        }
+        hiresInFlight = true
         session.captureHighResolutionFrame { [weak self] hiresFrame, error in
             DispatchQueue.main.async {
                 self?.handleHighResolution(hiresFrame, error: error)
@@ -927,7 +980,105 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         hiresCount += 1
         lastHiresTransform = frame.camera.transform
-        recorder.add(frame: frame, index: hiresCount)
+        if hiresFormatLabel.isEmpty {
+            hiresFormatLabel = "\(CVPixelBufferGetWidth(frame.capturedImage))x\(CVPixelBufferGetHeight(frame.capturedImage)) still"
+        }
+        recorder.add(frame: frame, index: hiresCount, source: "high_res_capture")
+    }
+
+    private var areaSilentRequested: Bool {
+        (UserDefaults.standard.string(forKey: KgeoDefaults.areaStillModeKey) ?? "silent") == "silent"
+    }
+
+    private var hiresSourceName: String {
+        hiresSource == .videoFrame ? "video_frame" : "high_res_capture"
+    }
+
+    private var videoSizeText: String {
+        "\(Int(recordVideoSize.width))x\(Int(recordVideoSize.height))"
+    }
+
+    /// 셔터음 방식 (captureHighResolutionFrame)
+    private func useShutterStills(_ config: ARWorldTrackingConfiguration) {
+        preferHighResolutionStillFormat(config)
+        hiresSource = .highResCapture
+        hiresFormatLabel = ""
+    }
+
+    /// 무음 후보 형식을 하나씩 켜 본다. 이미 시험해서 안 된다고 저장된 형식은 건너뛴다
+    private func beginSilentFormatSearch(_ config: ARWorldTrackingConfiguration) {
+        formatCandidates = FormatCatalog.silentCandidates().filter { format in
+            if let known = FormatCatalog.result(for: format), known.tested {
+                return known.usableForArea
+            }
+            return true
+        }
+        formatReady = false
+        recordButton.isUserInteractionEnabled = false
+        tryNextSilentFormat(config)
+    }
+
+    private func tryNextSilentFormat(_ config: ARWorldTrackingConfiguration) {
+        guard !formatCandidates.isEmpty else {
+            // 무음으로 쓸 형식이 없다 → 기본 형식 + 셔터음 방식
+            testingFormat = nil
+            if let original = defaultVideoFormat {
+                config.videoFormat = original
+            }
+            useShutterStills(config)
+            session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            finishFormatSearch()
+            return
+        }
+        let candidate = formatCandidates.removeFirst()
+        testingFormat = candidate
+        let token = Date()
+        formatTestStarted = token
+        config.videoFormat = candidate
+        session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        // 프레임이 아예 오지 않는 형식
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+            guard let self = self, self.testingFormat != nil, self.formatTestStarted == token,
+                  let config = self.arConfiguration else { return }
+            var failed = FormatCatalog.makeResult(candidate, frame: nil)
+            failed.tested = true
+            FormatCatalog.store(failed)
+            self.testingFormat = nil
+            self.tryNextSilentFormat(config)
+        }
+    }
+
+    /// 시험 중인 형식의 첫 프레임들: 깊이가 오고 RGB·깊이 비율이 같으면 채택
+    private func checkSilentFormat(frame: ARFrame) {
+        guard let candidate = testingFormat, let config = arConfiguration else { return }
+        let elapsed = Date().timeIntervalSince(formatTestStarted)
+        let width = CVPixelBufferGetWidth(frame.capturedImage)
+        let height = CVPixelBufferGetHeight(frame.capturedImage)
+        if (width != Int(candidate.imageResolution.width) || height != Int(candidate.imageResolution.height)) && elapsed < 3 {
+            return   // 앞 형식의 프레임
+        }
+        if frame.sceneDepth == nil && elapsed < 2.5 {
+            return   // 깊이는 첫 몇 프레임 뒤에 오기도 한다
+        }
+        var result = FormatCatalog.makeResult(candidate, frame: frame)
+        result.tested = true
+        FormatCatalog.store(result)
+        testingFormat = nil
+        if result.usableForArea {
+            hiresSource = .videoFrame
+            hiresFormatLabel = FormatCatalog.shortKey(candidate)
+            hiresFormatRecommended = candidate.isRecommendedForHighResolutionFrameCapturing
+            finishFormatSearch()
+        } else {
+            tryNextSilentFormat(config)
+        }
+    }
+
+    private func finishFormatSearch() {
+        formatReady = true
+        recordButton.isUserInteractionEnabled = true
+        updateFpsSetting()
+        scheduleExposureApply()
     }
 
     /// 바닥 모드: 폰이 아래를 보는지, 벽 모드: 수평을 보는지
@@ -1013,6 +1164,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             ? UIColor.black.withAlphaComponent(0.55)
             : UIColor.systemOrange.withAlphaComponent(0.85)
 
+        if !formatReady {
+            let label = testingFormat.map { FormatCatalog.label($0) } ?? ""
+            guideLabel.text = "무음 고해상도 사진용 카메라 형식 확인 중… \(label)"
+            guideLabel.isHidden = false
+            guideLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+            return
+        }
         if awaitingFrameFix { return }
 
         var text: String?
@@ -1077,7 +1235,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func updateFpsSetting() {
-        let fps = AvailableFpsSettings[chosenFpsSetting]
+        // 영상 형식이 30 fps 면 실제 저장 fps 도 그 기준
+        let base = arConfiguration?.videoFormat.framesPerSecond ?? 60
+        let fps = max(1, base / FpsDividers[chosenFpsSetting])
         let buttonLabel: String = "\(fps) fps"
         fpsButton.setTitle(buttonLabel, for: UIControl.State.normal)
     }

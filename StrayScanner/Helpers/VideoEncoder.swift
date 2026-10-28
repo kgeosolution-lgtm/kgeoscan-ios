@@ -8,6 +8,7 @@
 
 import Foundation
 import ARKit
+import VideoToolbox
 
 struct VideoEncoderInput {
     let buffer: CVPixelBuffer
@@ -29,6 +30,9 @@ class VideoEncoder {
     private let systemBootedAt: TimeInterval
     private var done: Bool = false
     private var previousFrame: Int = -1
+    // kgeoScan: 촬영 해상도가 녹화 크기보다 크면 VideoToolbox 로 줄여서 넣는다 (같으면 원본 그대로)
+    private var transferSession: VTPixelTransferSession?
+    private var scaledPool: CVPixelBufferPool?
     public var filePath: URL
     public var status: EncodingStatus = EncodingStatus.allGood
 
@@ -80,7 +84,7 @@ class VideoEncoder {
     }
 
     private func encode(frame: VideoEncoderInput, frameNumber: Int) {
-        let image: CVPixelBuffer = frame.buffer
+        let image: CVPixelBuffer = scaledIfNeeded(frame.buffer)
         let time = CMTime(value: Int64(frameNumber), timescale: timeScale)
         let success = videoAdapter!.append(image, withPresentationTime: time)
         if !success {
@@ -105,5 +109,37 @@ class VideoEncoder {
 
     private func createVideoAdapter(_ input: AVAssetWriterInput) -> AVAssetWriterInputPixelBufferAdaptor {
         return AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
+    }
+
+    /// kgeoScan: 녹화 크기(width × height)와 다르면 같은 픽셀 형식으로 줄인 버퍼를 돌려준다
+    private func scaledIfNeeded(_ buffer: CVPixelBuffer) -> CVPixelBuffer {
+        let targetWidth = Int(width)
+        let targetHeight = Int(height)
+        if CVPixelBufferGetWidth(buffer) == targetWidth && CVPixelBufferGetHeight(buffer) == targetHeight {
+            return buffer
+        }
+        if transferSession == nil {
+            var session: VTPixelTransferSession?
+            VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &session)
+            transferSession = session
+        }
+        if scaledPool == nil {
+            let attributes: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: CVPixelBufferGetPixelFormatType(buffer),
+                kCVPixelBufferWidthKey: targetWidth,
+                kCVPixelBufferHeightKey: targetHeight,
+                kCVPixelBufferIOSurfacePropertiesKey: [CFString: Any](),
+            ]
+            var pool: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool)
+            scaledPool = pool
+        }
+        guard let session = transferSession, let pool = scaledPool else { return buffer }
+        var output: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
+        guard let scaled = output, VTPixelTransferSessionTransferImage(session, from: buffer, to: scaled) == noErr else {
+            return buffer
+        }
+        return scaled
     }
 }

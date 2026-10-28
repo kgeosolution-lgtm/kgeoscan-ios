@@ -97,6 +97,12 @@ struct AreaInfo: Codable, Hashable {
     var hiresSkipped: Int?
     /// 고해상도 정지 사진에 맞는 영상 형식이었는지
     var hiresFormatRecommended: Bool?
+    /// 정지 사진 출처: video_frame (무음, 영상 프레임) | high_res_capture (captureHighResolutionFrame, 셔터음)
+    var hiresSource: String?
+    /// 영상 형식 ("3840x2880@30") 또는 정지 사진 크기 ("4032x3024 still")
+    var hiresFormat: String?
+    /// rgb.mp4 크기 ("1920x1440")
+    var videoSize: String?
 }
 
 /// Object Capture 기록 (meta.json 의 objcap)
@@ -215,6 +221,19 @@ struct ScanMeta: Codable, Hashable {
     func save(to directory: URL) throws {
         let data = try ScanMeta.encoder.encode(self)
         try data.write(to: ScanMeta.fileURL(in: directory), options: .atomic)
+    }
+
+    /// EXIF Model 용 제품 이름 (모르면 식별자 그대로)
+    static func marketingName() -> String {
+        let identifier = deviceModel()
+        let names: [String: String] = [
+            "iPhone13,3": "iPhone 12 Pro", "iPhone13,4": "iPhone 12 Pro Max",
+            "iPhone14,2": "iPhone 13 Pro", "iPhone14,3": "iPhone 13 Pro Max",
+            "iPhone15,2": "iPhone 14 Pro", "iPhone15,3": "iPhone 14 Pro Max",
+            "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
+            "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
+        ]
+        return names[identifier] ?? identifier
     }
 
     /// 기기 모델 식별자 (예: iPhone16,1)

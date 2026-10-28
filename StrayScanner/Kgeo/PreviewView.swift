@@ -290,6 +290,13 @@ struct PreviewView: View {
             } else {
                 if let area = meta.area {
                     LabeledContent("방식", value: "면 촬영 (정사영상) · \(PreviewView.surfaceLabel(area.surface))")
+                    if let source = area.hiresSource {
+                        LabeledContent("정지 사진", value: (source == "video_frame" ? "무음 (영상 프레임)" : "고해상도 사진 (셔터음)")
+                                       + (area.hiresFormat.map { " · \($0)" } ?? ""))
+                    }
+                    if let videoSize = area.videoSize {
+                        LabeledContent("영상 (rgb.mp4)", value: videoSize)
+                    }
                     LabeledContent("고해상도 사진", value: "\(area.hires)장" + ((area.hiresSkipped ?? 0) > 0 ? " · 흔들려서 건너뜀 \(area.hiresSkipped ?? 0)회" : ""))
                     if area.hires < 10 {
                         Text("고해상도 사진이 적습니다 — 대상 면을 더 넓게, 천천히 지그재그로 훑으면 정사영상이 좋아집니다.")

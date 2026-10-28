@@ -15,6 +15,7 @@ struct SettingsView: View {
     @AppStorage(KgeoDefaults.uploadTransportKey) private var transportRaw: String = UploadTransport.system.rawValue
     @AppStorage(KgeoDefaults.meshColorKey) private var meshColor: String = "red"
     @AppStorage(KgeoDefaults.meshOpacityKey) private var meshOpacity: Double = 0.5
+    @AppStorage(KgeoDefaults.areaStillModeKey) private var areaStillMode: String = "silent"
     @AppStorage(ExposureController.modeKey) private var exposureRaw: String = ExposureController.Mode.auto.rawValue
     @AppStorage(KgeoDefaults.locationSourceKey) private var locationSourceRaw: String = "gps"
 
@@ -89,6 +90,25 @@ struct SettingsView: View {
                 Text("녹화 화면에서 스캔된 면을 덮는 색입니다. 흰 윤곽선이 함께 그려집니다. 다음 녹화 화면부터 적용됩니다.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            Section("면 촬영 사진") {
+                Picker("방식", selection: $areaStillMode) {
+                    Text("무음 (영상 프레임)").tag("silent")
+                    Text("고해상도 사진 (셔터음)").tag("shutter")
+                }
+                .pickerStyle(.segmented)
+                Text(areaStillMode == "silent"
+                     ? "무음: 높은 해상도 영상 형식으로 녹화하면서 그 프레임을 정지 사진으로 저장합니다(셔터음 없음). 쓸 형식이 없으면 자동으로 고해상도 사진(셔터음) 방식으로 찍습니다."
+                     : "고해상도 사진: ARKit 정지 사진(captureHighResolutionFrame)을 씁니다. 한국판 아이폰은 찍을 때마다 셔터음이 납니다.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text(FormatCatalog.silentStatus())
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                NavigationLink("카메라 형식 진단") {
+                    FormatDiagnosticsView()
+                }
             }
 
             Section("촬영") {
