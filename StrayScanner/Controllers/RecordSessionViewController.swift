@@ -17,6 +17,9 @@
 //  - 촬영 안내: 트래킹 상태, LiDAR 거리, 깊이 신뢰도, 움직임 속도, 흐림 경고, 모드별 힌트, 프레임 수·예상 용량.
 //  - 녹화 중 가장 선명한 프레임을 thumb.jpg 로 저장, 종료 뒤 촬영 통계 요약과 '다시 찍기' 제안.
 //  - 노출 옵션(빠른 셔터)으로 모션블러를 줄인다.
+//  - 촬영 품질 (FrameQuality.swift): 프레임마다 흔들림을 예측해 '천천히' + 가벼운 햅틱(1초에 1번까지), 흔들린 프레임은
+//    색 점 미리보기 누적에서 빼고 frame_quality.csv 로 남긴다. 방 모드 제자리 회전 경고, 모드별 거리 배지,
+//    3분 경과 안내(녹화는 계속), 발열(serious 이상) 때 미리보기 수집 간격·화면 갱신 줄이기, 촬영 요약 통계.
 //  녹화 데이터(DatasetEncoder 이하)는 원본 그대로다.
 //
 
@@ -154,6 +157,20 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     /// 이 기기의 ARKit 광각 카메라 내부 파라미터를 한 번 저장했는지 (Object Capture 사진의 내부 파라미터 환산용)
     private var intrinsicsChecked = false
 
+    // 촬영 품질 (FrameQuality.swift): 흔들림 예측·제자리 회전·거리 배지·발열
+    private let qualityMonitor = FrameQualityMonitor()
+    private let rotationDetector = InPlaceRotationDetector()
+    /// 제자리 회전 경고를 쓰는지 (방 모드만 — 물체·현장조사·면은 돌거나 훑는 게 정상)
+    private var inPlaceCheck = false
+    private var lastQuality: FrameQualitySample?
+    private var lastCenterDepth: Float?
+    private let distanceLabel = PaddedLabel()
+    private let shakeHaptic = UIImpactFeedbackGenerator(style: .light)
+    private var lastShakeHaptic: TimeInterval = 0
+    private var thermalThrottled = false
+    /// 면 촬영 셔터음 방식의 정지 사진 가로 px (첫 사진에서 알게 된다)
+    private var hiresStillWidth: Int?
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -179,6 +196,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         } else {
             guide.thresholds = (scanMeta?.mode ?? .home) == .survey ? CaptureGuide.survey : CaptureGuide.home
         }
+        qualityMonitor.limits = areaMode ? FrameQualityMonitor.area : FrameQualityMonitor.standard
+        inPlaceCheck = !objectMode && !areaMode && (scanMeta?.mode ?? .home) == .home
         setupSceneView()
         setupOverlayViews()
         if objectMode {
@@ -246,7 +265,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func setupOverlayViews() {
-        for label in [geoLabel, trackingLabel, guideLabel, statsLabel] {
+        for label in [geoLabel, trackingLabel, guideLabel, statsLabel, distanceLabel] {
             label.translatesAutoresizingMaskIntoConstraints = false
             label.font = UIFont.monospacedSystemFont(ofSize: 13, weight: .medium)
             label.textColor = .white
@@ -264,6 +283,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guideLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
         guideLabel.numberOfLines = 3
         guideLabel.isHidden = true
+        distanceLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+        distanceLabel.text = "거리 —"
+        shakeHaptic.prepare()
 
         styleButton(overlayButton, title: "메시 켜짐")
         overlayButton.addTarget(self, action: #selector(overlayButtonTapped), for: .touchUpInside)
@@ -276,6 +298,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             trackingLabel.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
             trackingLabel.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
             trackingLabel.leadingAnchor.constraint(greaterThanOrEqualTo: geoLabel.trailingAnchor, constant: 8),
+            distanceLabel.topAnchor.constraint(equalTo: trackingLabel.bottomAnchor, constant: 6),
+            distanceLabel.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            distanceLabel.leadingAnchor.constraint(greaterThanOrEqualTo: safe.leadingAnchor, constant: 12),
             guideLabel.bottomAnchor.constraint(equalTo: depthView.bottomAnchor, constant: -12),
             guideLabel.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
             guideLabel.widthAnchor.constraint(lessThanOrEqualTo: safe.widthAnchor, constant: -24),
@@ -462,6 +487,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         lastPointSampleTime = 0
         lastPointSampleTransform = nil
         firstPointTransform = nil
+        qualityMonitor.reset()
+        rotationDetector.reset()
+        lastQuality = nil
+        lastShakeHaptic = 0
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
@@ -517,6 +546,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         startedRecording = Date()
         captureStartedAt = Date()
         guide.resetStats()
+        qualityMonitor.resetStats()
+        rotationDetector.reset()
         startRawIMU()
     }
 
@@ -569,6 +600,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         switch encoder.status {
             case .allGood:
                 var stats = guide.summary()
+                applyQualityStats(&stats)
                 if objectMode && objectTracker.isSet {
                     let coverage = objectTracker.coveragePercent
                     stats.coveragePct = coverage
@@ -710,12 +742,20 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if let encoder = datasetEncoder {
             let frames = encoder.savedFrameCount
             var megabytes = Double(Int64(frames) * KgeoDefaults.bytesPerFrameEstimate) / 1_048_576
+            var text: String
             if areaMode {
                 megabytes += Double(hiresCount) * 3.5
-                statsLabel.text = String(format: "%d 프레임 · 고해상도 %d장 · ≈%.0f MB", frames, hiresCount, megabytes)
+                text = String(format: "%d 프레임 · 고해상도 %d장 · ≈%.0f MB", frames, hiresCount, megabytes)
             } else {
-                statsLabel.text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
+                text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
             }
+            if seconds >= 180 {
+                text += " · 3분 넘음"
+            }
+            if thermalThrottled {
+                text += " · 발열: 미리보기 수집 줄임"
+            }
+            statsLabel.text = text
         }
     }
 
@@ -784,6 +824,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             session.run(config, options: [.resetTracking, .removeExistingAnchors])
             scheduleExposureApply()
             guide.reset()
+            qualityMonitor.reset()
             awaitingFrameFix = true
             frameFixStarted = Date()
             guideLabel.text = "잠시 그대로 — 기준 위치를 잡는 중"
@@ -903,6 +944,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             }
         }
         let capturing = startedRecording != nil && !awaitingTracking
+        // 흔들림 예측은 프레임마다 (frame_quality.csv 한 행 + '천천히' + 색 점 누적 판단)
+        var blurDepth = lastCenterDepth
+        if objectMode, objectTracker.isSet {
+            blurDepth = objectTracker.distance
+        }
+        let quality = qualityMonitor.update(frame: frame, depth: blurDepth, recording: capturing)
+        lastQuality = quality
+        if capturing, qualityMonitor.shaking, frame.timestamp - lastShakeHaptic >= 1.0 {
+            lastShakeHaptic = frame.timestamp
+            shakeHaptic.impactOccurred()
+        }
         if frameCounter % 6 == 0 {
             updateGuidance(frame: frame, capturing: capturing)
             if objectMode {
@@ -921,21 +973,25 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             guard ready else { return }
             beginCapture()
         }
-        encoder.add(frame: frame)
+        encoder.add(frame: frame, quality: quality)
         considerThumbnail(frame: frame, directory: encoder.directory.absoluteURL.standardizedFileURL)
         considerColorKeyframe(frame: frame)
         considerPointSample(frame: frame)
         considerHighResolution(frame: frame)
     }
 
-    /// 색 점 미리보기 샘플: 0.25초마다, 또는 8 cm 이동·8° 회전 때 (최소 0.1초 간격, 앞 샘플을 합치는 중이면 건너뜀)
+    /// 색 점 미리보기 샘플: 0.25초마다, 또는 8 cm 이동·8° 회전 때 (최소 0.1초 간격, 앞 샘플을 합치는 중이면 건너뜀).
+    /// 흔들림 예측이 8 px 를 넘는 프레임은 빼고, 발열이 serious 이상이면 0.75초·20 cm·20° 로 늘린다
     private func considerPointSample(frame: ARFrame) {
         guard let accumulator = pointAccumulator, frame.sceneDepth != nil else { return }
         guard case .normal = frame.camera.trackingState else { return }
+        if let quality = lastQuality, quality.blurPx > qualityMonitor.limits.accumulate {
+            return
+        }
         let elapsed = frame.timestamp - lastPointSampleTime
-        guard elapsed >= 0.1 else { return }
+        guard elapsed >= (thermalThrottled ? 0.4 : 0.1) else { return }
         let transform = frame.camera.transform
-        var due = elapsed >= 0.25
+        var due = elapsed >= (thermalThrottled ? 0.75 : 0.25)
         if !due, let last = lastPointSampleTransform {
             let moved = simd_distance(transform.columns.3, last.columns.3)
             let delta = simd_quatf(transform) * simd_quatf(last).inverse
@@ -943,7 +999,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if turned > 180 {
                 turned = 360 - turned
             }
-            due = moved >= 0.08 || turned >= 8
+            due = moved >= (thermalThrottled ? 0.2 : 0.08) || turned >= (thermalThrottled ? 20 : 8)
         }
         guard due else { return }
         var crop: PreviewCrop?
@@ -997,7 +1053,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             }
             guard moved >= 0.12 || turned >= 10 else { return }
         }
-        if lastGuidanceSpeed > 0.5 || lastGuidanceRotation > 45 {
+        let blurred = (lastQuality?.blurPx ?? 0) > qualityMonitor.limits.accumulate
+        if lastGuidanceSpeed > 0.5 || lastGuidanceRotation > 45 || blurred {
             if frame.timestamp - lastShakeSkipTime >= 1 {
                 lastShakeSkipTime = frame.timestamp
                 hiresSkipped += 1
@@ -1032,6 +1089,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         hiresCount += 1
         lastHiresTransform = frame.camera.transform
+        hiresStillWidth = CVPixelBufferGetWidth(frame.capturedImage)
         if hiresFormatLabel.isEmpty {
             hiresFormatLabel = "\(CVPixelBufferGetWidth(frame.capturedImage))x\(CVPixelBufferGetHeight(frame.capturedImage)) still"
         }
@@ -1159,10 +1217,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
     }
 
-    /// 미리보기 정점 색용 키프레임 (트래킹 정상일 때만)
+    /// 미리보기 정점 색용 키프레임 (트래킹 정상이고 흔들리지 않은 프레임만, 발열 때는 1.5초 이상 간격)
     private func considerColorKeyframe(frame: ARFrame) {
-        guard meshSupported, frame.timestamp - lastKeyframeTime >= keyframeInterval else { return }
+        let interval = thermalThrottled ? max(keyframeInterval, 1.5) : keyframeInterval
+        guard meshSupported, frame.timestamp - lastKeyframeTime >= interval else { return }
         guard case .normal = frame.camera.trackingState else { return }
+        if let quality = lastQuality, quality.blurPx > qualityMonitor.limits.accumulate {
+            return
+        }
         lastKeyframeTime = frame.timestamp
         guard let keyframe = ColorKeyframe(frame: frame) else { return }
         colorKeyframes.append(keyframe)
@@ -1205,16 +1267,16 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let guidance = guide.evaluate(frame: frame, recording: capturing)
         lastGuidanceSpeed = guidance.speed
         lastGuidanceRotation = guidance.rotationSpeed
-        var trackingText = guidance.trackingText
-        if objectMode, objectTracker.isSet {
-            trackingText += String(format: " · 물체 %.2f m", objectTracker.distance)
-        } else if let depth = guidance.centerDepth {
-            trackingText += String(format: " · %.2f m", depth)
-        }
-        trackingLabel.text = trackingText
+        lastCenterDepth = guidance.centerDepth
+        trackingLabel.text = guidance.trackingText
         trackingLabel.backgroundColor = guidance.trackingOK
             ? UIColor.black.withAlphaComponent(0.55)
             : UIColor.systemOrange.withAlphaComponent(0.85)
+        updateDistanceBadge(frame: frame, depth: guidance.centerDepth)
+        updateThermalState()
+        // 제자리 회전 (방 모드, 녹화 중)
+        let rotatingInPlace = capturing && inPlaceCheck
+            && rotationDetector.update(transform: frame.camera.transform, timestamp: frame.timestamp)
 
         if !formatReady {
             let label = testingFormat.map { FormatCatalog.label($0) } ?? ""
@@ -1228,6 +1290,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         var text: String?
         if !guidance.trackingOK {
             text = guidance.warning
+        } else if capturing, qualityMonitor.shaking {
+            text = String(format: "천천히 — 흔들림 %.0f px", lastQuality?.blurPx ?? 0)
+            guide.countWarning("shake")
+        } else if let notice = captureTimeNotice(capturing: capturing) {
+            text = notice
         } else if objectMode, let objectWarning = objectTracker.warning() {
             text = objectWarning
             if capturing {
@@ -1238,6 +1305,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if capturing {
                 guide.countWarning("tilt")
             }
+        } else if rotatingInPlace {
+            text = "옆으로 걸으면서 찍어 주세요 — 제자리에서 돌기만 하면 3D 가 비어요"
+            guide.countWarning("in_place")
         } else {
             text = guidance.warning
         }
@@ -1267,6 +1337,92 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guideLabel.backgroundColor = isWarning
             ? UIColor.systemOrange.withAlphaComponent(0.9)
             : UIColor.black.withAlphaComponent(0.55)
+    }
+
+    /// 거리 배지: 화면 중앙 깊이(물체 모드는 물체까지)를 모드별 권장 범위와 비교 (방 1~2 m, 물체 0.35~0.9 m,
+    /// 현장조사 0.4~1.5 m, 면 촬영은 정지 사진 0.6 mm/px 가 되는 거리까지)
+    private func updateDistanceBadge(frame: ARFrame, depth: Float?) {
+        var distance = depth
+        var prefix = ""
+        let band: DistanceAdvice.Band
+        if areaMode {
+            band = DistanceAdvice.area(stillFx: areaStillFx(frame: frame))
+        } else if objectMode {
+            band = DistanceAdvice.object
+            if objectTracker.isSet {
+                distance = objectTracker.distance
+                prefix = "물체 "
+            }
+        } else if (scanMeta?.mode ?? .home) == .survey {
+            band = DistanceAdvice.survey
+        } else {
+            band = DistanceAdvice.room
+        }
+        let advice = DistanceAdvice.evaluate(distance: distance, band: band)
+        distanceLabel.text = prefix + advice.text
+        switch advice.state {
+        case .good:
+            distanceLabel.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.8)
+        case .near, .far:
+            distanceLabel.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.85)
+        case .unknown:
+            distanceLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        }
+    }
+
+    /// 면 촬영 정지 사진의 fx (px): 무음은 영상 프레임 그대로, 셔터음은 고해상도 사진 크기로 환산 (모르면 가로 4032)
+    private func areaStillFx(frame: ARFrame) -> Float {
+        let fx = frame.camera.intrinsics.columns.0.x
+        guard hiresSource == .highResCapture else { return fx }
+        let width = Float(frame.camera.imageResolution.width)
+        let stillWidth = Float(hiresStillWidth ?? 4032)
+        return width > 0 ? fx * max(1, stillWidth / width) : fx
+    }
+
+    /// 발열이 serious 이상이면 색 점·색 키프레임 수집 간격을 늘리고 화면 갱신을 15 fps 로 낮춘다 (녹화 데이터는 그대로)
+    private func updateThermalState() {
+        let state = ProcessInfo.processInfo.thermalState
+        let hot = state == .serious || state == .critical
+        guard hot != thermalThrottled else { return }
+        thermalThrottled = hot
+        sceneView.preferredFramesPerSecond = hot ? 15 : 30
+    }
+
+    /// 녹화 3분부터 2분마다 6초씩: 나눠 찍기 권장 (녹화는 멈추지 않는다)
+    private func captureTimeNotice(capturing: Bool) -> String? {
+        guard capturing, let began = captureStartedAt else { return nil }
+        let elapsed = Date().timeIntervalSince(began)
+        guard elapsed >= 180, (elapsed - 180).truncatingRemainder(dividingBy: 120) < 6 else { return nil }
+        let minutes = Int(elapsed / 60)
+        if inPlaceCheck {
+            return "\(minutes)분째 녹화 중 — 방 단위로 나눠 찍기를 권장합니다 (녹화는 계속됩니다)"
+        }
+        return "\(minutes)분째 녹화 중 — 길면 처리가 오래 걸립니다. 나눠 찍기를 권장합니다 (녹화는 계속됩니다)"
+    }
+
+    /// 흔들림·추적 불안정·제자리 회전 통계를 촬영 요약에 넣는다
+    private func applyQualityStats(_ stats: inout CaptureStats) {
+        if let summary = qualityMonitor.summary() {
+            let limit = qualityMonitor.limits.warnOn
+            stats.blurFrameRatio = summary.blurredRatio
+            stats.blurMedianPx = summary.medianBlur
+            stats.blurLimitPx = limit
+            stats.trackingUnstableSeconds = summary.unstableSeconds
+            if summary.blurredRatio > 0.2 {
+                stats.warnings.append(String(format: "흔들린 프레임 %.0f%% (%.0f px 이상) — 더 천천히, 특히 돌 때 천천히",
+                                             summary.blurredRatio * 100, limit))
+            }
+            if summary.unstableSeconds >= 3 {
+                stats.warnings.append(String(format: "추적 불안정 %.0f초 — 무늬가 있는 곳을 비추며 천천히",
+                                             summary.unstableSeconds))
+            }
+        }
+        if inPlaceCheck {
+            stats.inPlaceRotations = rotationDetector.events
+            if rotationDetector.events >= 3 {
+                stats.warnings.append("제자리 회전 \(rotationDetector.events)회 — 옆으로 걸으면서 찍어야 3D 가 잘 나옵니다")
+            }
+        }
     }
 
     private func modeHint() -> String {

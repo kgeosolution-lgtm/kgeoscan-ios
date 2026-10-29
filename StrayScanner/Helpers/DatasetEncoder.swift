@@ -24,6 +24,8 @@ class DatasetEncoder {
     private let odometryEncoder: OdometryEncoder
     private let imuEncoder: IMUEncoder
     private let distortionEncoder: DistortionEncoder
+    /// kgeoScan: frame_quality.csv (흔들림 예측·트래킹 상태, 프레임 번호는 odometry.csv 와 같다)
+    private let qualityWriter: FrameQualityWriter
     private var lastFrame: ARFrame?
     private var dispatchGroup = DispatchGroup()
     private var currentFrame: Int = -1
@@ -74,9 +76,11 @@ class DatasetEncoder {
         self.imuPath = datasetDirectory.appendingPathComponent("imu.csv", isDirectory: false)
         self.imuEncoder = IMUEncoder(url: self.imuPath)
         self.distortionEncoder = DistortionEncoder(datasetDirectory: datasetDirectory)
+        self.qualityWriter = FrameQualityWriter(directory: datasetDirectory)
     }
 
-    func add(frame: ARFrame) {
+    /// kgeoScan: quality 가 있으면 저장되는 프레임마다 frame_quality.csv 한 행을 같은 프레임 번호로 쓴다
+    func add(frame: ARFrame, quality: FrameQualitySample? = nil) {
         let totalFrames: Int = currentFrame
         currentFrame = currentFrame + 1
         if (currentFrame % frameInterval != 0) {
@@ -106,6 +110,9 @@ class DatasetEncoder {
             }
             self.rgbEncoder.add(frame: VideoEncoderInput(buffer: frame.capturedImage, time: frame.timestamp), currentFrame: totalFrames)
             self.odometryEncoder.add(frame: frame, currentFrame: frameNumber)
+            if let quality = quality {
+                self.qualityWriter.add(quality, frame: frameNumber)
+            }
             self.distortionEncoder.add(frame: frame, currentFrame: frameNumber)
             self.lastFrame = frame
         }
@@ -149,6 +156,7 @@ class DatasetEncoder {
         self.rgbEncoder.finishEncoding()
         self.imuEncoder.done()
         self.odometryEncoder.done()
+        self.qualityWriter.done()
         self.distortionEncoder.done()
         writeIntrinsics()
         switch self.rgbEncoder.status {

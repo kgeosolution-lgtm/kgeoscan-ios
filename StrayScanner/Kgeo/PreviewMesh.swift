@@ -543,7 +543,8 @@ extension PreviewBuilder {
     }
 
     /// writePointsPLY 가 쓴 형식만 읽는다. 녹화 시작 카메라(위치·정면)와 복셀 크기도 함께
-    static func readPointsPLY(_ url: URL) throws -> (cloud: ColoredPoints, eye: SIMD3<Float>?, voxel: Float) {
+    static func readPointsPLY(_ url: URL) throws
+        -> (cloud: ColoredPoints, eye: SIMD3<Float>?, forward: SIMD3<Float>?, voxel: Float) {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         guard let range = data.range(of: Data("end_header\n".utf8)) else {
             throw PreviewError.badFile("PLY 머리말이 없습니다")
@@ -551,6 +552,7 @@ extension PreviewBuilder {
         let headerText = String(decoding: data[data.startIndex..<range.upperBound], as: UTF8.self)
         var count = 0
         var eye: SIMD3<Float>?
+        var forward: SIMD3<Float>?
         var voxel: Float = 0.01
         for line in headerText.split(separator: "\n") {
             let parts = line.split(separator: " ")
@@ -561,6 +563,9 @@ extension PreviewBuilder {
             } else if parts.count == 8, parts[0] == "comment", parts[1] == "start_camera",
                       let x = Float(parts[2]), let y = Float(parts[3]), let z = Float(parts[4]) {
                 eye = SIMD3<Float>(x, y, z)
+                if let fx = Float(parts[5]), let fy = Float(parts[6]), let fz = Float(parts[7]) {
+                    forward = SIMD3<Float>(fx, fy, fz)
+                }
             }
         }
         let start = range.upperBound - data.startIndex
@@ -583,11 +588,26 @@ extension PreviewBuilder {
                 o += 15
             }
         }
-        return (cloud, eye, voxel)
+        return (cloud, eye, forward, voxel)
     }
 }
 
-// MARK: - 보여 주기 (SceneKit)
+// MARK: - 보여 주기
+
+/// 색 점 미리보기 (PointCloudRenderer 가 Metal 로 그린다. Metal 을 못 쓰면 makePointScene 의 SceneKit 점)
+struct PreviewPointCloud {
+    let points: ColoredPoints
+    /// 복셀 크기 (m): 점 지름 = 복셀 × 1.3
+    let voxel: Float
+    let center: SIMD3<Float>
+    let radius: Float
+    /// 녹화 시작 카메라 위치·정면 (처음 시점)
+    let eye: SIMD3<Float>?
+    let forward: SIMD3<Float>?
+    let kind: String
+
+    var pointCount: Int { points.positions.count }
+}
 
 struct PreviewSceneResult {
     let scene: SCNScene
@@ -628,14 +648,27 @@ enum PreviewSceneLoader {
     }
 
     /// 녹화 폴더의 색 점 미리보기 (preview/points.ply). 없으면 nil
-    static func loadPoints(directory: URL) throws -> PreviewSceneResult? {
+    static func loadPoints(directory: URL) throws -> PreviewPointCloud? {
         let url = PreviewBuilder.pointsURL(for: directory)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let loaded = try PreviewBuilder.readPointsPLY(url)
-        return makePointScene(loaded.cloud, eye: loaded.eye, voxel: loaded.voxel)
+        let positions = loaded.cloud.positions
+        var minPoint = SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
+        var maxPoint = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+        var sum = SIMD3<Float>(0, 0, 0)
+        for p in positions {
+            minPoint = simd_min(minPoint, p)
+            maxPoint = simd_max(maxPoint, p)
+            sum += p
+        }
+        let center = positions.isEmpty ? SIMD3<Float>(0, 0, 0) : sum / Float(positions.count)
+        let radius = positions.isEmpty ? 1 : max(simd_length(maxPoint - minPoint) / 2, 0.05)
+        return PreviewPointCloud(points: loaded.cloud, voxel: loaded.voxel, center: center, radius: radius,
+                                 eye: loaded.eye, forward: loaded.forward,
+                                 kind: "색 점 (녹화 중 깊이 + 원본 영상 색)")
     }
 
-    /// 조명 없는 점 (SCNGeometryElement .point), 점 크기는 복셀 크기 기준이고 화면에서 반지름 1~3 px
+    /// Metal 을 못 쓸 때의 SceneKit 점 (조명 없음, 네모 점). 점 지름은 월드 크기 복셀 × 1.3, 화면 반지름 1~24 px
     static func makePointScene(_ cloud: ColoredPoints, eye: SIMD3<Float>?, voxel: Float) -> PreviewSceneResult {
         let count = cloud.positions.count
         let vertexSource = SCNGeometrySource(vertices: cloud.positions.map { SCNVector3($0.x, $0.y, $0.z) })
@@ -652,9 +685,10 @@ enum PreviewSceneLoader {
         let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
         let element = SCNGeometryElement(data: indexData, primitiveType: .point, primitiveCount: count,
                                          bytesPerIndex: MemoryLayout<UInt32>.size)
-        element.pointSize = CGFloat(voxel * 1.5)
+        // 세 값을 모두 줘야 월드 크기로 동작한다
+        element.pointSize = CGFloat(voxel * 1.3)
         element.minimumPointScreenSpaceRadius = 1
-        element.maximumPointScreenSpaceRadius = 3
+        element.maximumPointScreenSpaceRadius = 24
         let geometry = SCNGeometry(sources: [vertexSource, colorSource], elements: [element])
         let material = SCNMaterial()
         material.lightingModel = .constant

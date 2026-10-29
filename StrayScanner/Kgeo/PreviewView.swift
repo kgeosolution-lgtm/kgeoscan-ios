@@ -32,11 +32,17 @@ enum RecordingStore {
     }
 }
 
-/// SceneKit 3D 뷰: 한 손가락으로 돌리고 두 손가락으로 확대·이동
+/// SceneKit 3D 뷰 (메시·Object Capture 모델, Metal 을 못 쓸 때의 색 점): 한 손가락으로 돌리고 두 손가락으로 확대·이동
 struct PreviewSceneView: UIViewRepresentable {
     let result: PreviewSceneResult
 
     func makeUIView(context: Context) -> SCNView {
+        PreviewSceneView.makeView(result)
+    }
+
+    func updateUIView(_ uiView: SCNView, context: Context) {}
+
+    static func makeView(_ result: PreviewSceneResult) -> SCNView {
         let view = SCNView(frame: .zero)
         view.scene = result.scene
         view.backgroundColor = UIColor(white: 0.13, alpha: 1)
@@ -74,14 +80,12 @@ struct PreviewSceneView: UIViewRepresentable {
         view.defaultCameraController.inertiaEnabled = true
         return view
     }
-
-    func updateUIView(_ uiView: SCNView, context: Context) {}
 }
 
 final class PreviewViewModel: ObservableObject {
     @Published var meta: ScanMeta?
     /// 색 점 미리보기 (영상 녹화의 기본)
-    @Published var points: PreviewSceneResult?
+    @Published var points: PreviewPointCloud?
     @Published var loadingPoints = false
     @Published var pointsReason: String?
     /// 메시 미리보기 또는 Object Capture 모델
@@ -143,7 +147,7 @@ final class PreviewViewModel: ObservableObject {
         guard force || (points == nil && !loadingPoints && pointsReason == nil) else { return }
         loadingPoints = true
         DispatchQueue.global(qos: .userInitiated).async {
-            var result: PreviewSceneResult?
+            var result: PreviewPointCloud?
             var reason: String?
             do {
                 result = try PreviewSceneLoader.loadPoints(directory: dir)
@@ -214,6 +218,8 @@ struct PreviewView: View {
     @State private var confirmRetake = false
     /// 영상 녹화: false = 색 점(기본), true = 메시
     @State private var showMesh = false
+    /// 색 점 EDL 음영 (기본 켬)
+    @AppStorage(KgeoDefaults.previewEDLKey) private var edlEnabled: Bool = true
     let context: Context
     let onUpload: (() -> Void)?
     let onRetake: ((ScanMeta) -> Void)?
@@ -234,11 +240,20 @@ struct PreviewView: View {
         Form {
             Section {
                 if !vm.isObjcap {
-                    Picker("표시", selection: $showMesh) {
-                        Text("색 점").tag(false)
-                        Text("메시").tag(true)
+                    HStack(spacing: 10) {
+                        Picker("표시", selection: $showMesh) {
+                            Text("색 점").tag(false)
+                            Text("메시").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                        if !showMesh {
+                            Toggle(isOn: $edlEnabled) {
+                                Text("음영")
+                            }
+                            .toggleStyle(.button)
+                            .fixedSize()
+                        }
                     }
-                    .pickerStyle(.segmented)
                 }
                 viewer
                     .frame(height: 360)
@@ -340,8 +355,8 @@ struct PreviewView: View {
                     .foregroundColor(.secondary)
             }
             .padding(24)
-        } else if let result = vm.points {
-            PreviewSceneView(result: result)
+        } else if let cloud = vm.points {
+            PointCloudView(cloud: cloud, edl: edlEnabled)
         } else if vm.loadingPoints {
             ProgressView("미리보기 여는 중…")
         } else if let failure = builder.pointsFailures[key] {
@@ -381,12 +396,13 @@ struct PreviewView: View {
     }
 
     private var caption: String? {
-        let shown = (vm.isObjcap || showMesh) ? vm.model : vm.points
-        guard let result = shown else { return nil }
-        var parts = [result.kind]
-        if result.pointCount > 0 {
-            parts.append("점 \(result.pointCount)")
+        if !(vm.isObjcap || showMesh) {
+            guard let cloud = vm.points else { return nil }
+            let shading = edlEnabled ? " · 음영(EDL)" : ""
+            return "\(cloud.kind) · 점 \(cloud.pointCount)\(shading) — 한 손가락으로 돌리고 두 손가락으로 확대·이동, 두 번 탭하면 처음 시점"
         }
+        guard let result = vm.model else { return nil }
+        var parts = [result.kind]
         if result.triangles > 0 {
             parts.append("삼각형 \(result.triangles)")
         }
@@ -447,6 +463,16 @@ struct PreviewView: View {
                         let bands = stats.elevationBands ?? [:]
                         LabeledContent("둘레 커버리지", value: String(format: "%.0f%% (위 %.0f%%)", coverage, bands["high"] ?? 0))
                     }
+                    if let ratio = stats.blurFrameRatio {
+                        LabeledContent("흔들림 프레임", value: String(format: "%.0f%% (%.0f px 이상) · 중앙값 %.1f px",
+                                                                  ratio * 100, stats.blurLimitPx ?? 6, stats.blurMedianPx ?? 0))
+                    }
+                    if let unstable = stats.trackingUnstableSeconds {
+                        LabeledContent("추적 불안정", value: String(format: "%.0f초", unstable))
+                    }
+                    if let turns = stats.inPlaceRotations {
+                        LabeledContent("제자리 회전 경고", value: "\(turns)회")
+                    }
                     if let counts = stats.warningCounts, !counts.isEmpty {
                         LabeledContent("경고 시간", value: PreviewView.countsText(counts))
                     }
@@ -480,8 +506,8 @@ struct PreviewView: View {
     static func countsText(_ counts: [String: Int]) -> String {
         let labels: [(String, String)] = [
             ("tracking", "트래킹"), ("close", "가까움"), ("far", "멂"), ("no_depth", "깊이 없음"),
-            ("fast", "빠름"), ("blur", "흐림"), ("low_confidence", "신뢰 낮음"), ("object", "물체 거리·회전"),
-            ("tilt", "기울기"),
+            ("fast", "빠름"), ("shake", "흔들림"), ("blur", "흐림"), ("low_confidence", "신뢰 낮음"),
+            ("object", "물체 거리·회전"), ("tilt", "기울기"), ("in_place", "제자리 회전"),
         ]
         var parts: [String] = []
         for (key, label) in labels {

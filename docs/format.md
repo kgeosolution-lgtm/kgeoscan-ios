@@ -67,6 +67,25 @@ The `imu.csv` file contains timestamps, linear acceleration readings and angular
 | alpha\_z | Rotation in rad/s around the z-axis |
 
 
+## kgeoScan addition: `frame_quality.csv`
+
+One row per saved frame, written by the same encoder queue as `odometry.csv`, so `frame` is the same number as the
+`frame` column of `odometry.csv`, the `depth/` and `confidence/` file names and the frame index in `rgb.mp4`
+(frames the encoder dropped have no row in either file). The first line is the header
+`frame,timestamp,blur_px,tracking,omega_dps,speed_mps`. Recordings made before 2026-10-29 do not have this file.
+
+| Field | Meaning |
+|---|---|
+| frame | Frame number (plain integer, `odometry.csv` writes the same number zero-padded) |
+| timestamp | ARFrame timestamp in seconds, same value as `odometry.csv` |
+| blur_px | Predicted motion blur during the exposure, in pixels of a 1920 px wide image: (ω·fx + v·fx / z) × exposure, with ω (rad/s) and v (m/s) the rotation and translation speed between this and the previous ARFrame pose, z = median LiDAR depth in the image centre (2 m if unknown), fx scaled to 1920 px width, exposure = `ARCamera.exposureDuration` |
+| tracking | ARKit tracking state: `normal`, `excessiveMotion`, `insufficientFeatures`, `initializing`, `relocalizing` or `notAvailable` |
+| omega_dps | Camera rotation speed in degrees per second |
+| speed_mps | Camera translation speed in metres per second |
+
+The app warns ("천천히") when `blur_px` stays at 6 or more for 0.5 s (4 in area mode) and leaves frames above 8 out of the
+on-phone point preview. The server can use the file to weight or drop frames; without it, processing is unchanged.
+
 ## kgeoScan addition: `meta.json`
 
 kgeoScan (a fork of Stray Scanner) writes one extra file, `meta.json`, into the dataset folder. Everything above is unchanged.

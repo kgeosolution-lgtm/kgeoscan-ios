@@ -4,6 +4,7 @@
 //
 //  촬영 안내: 트래킹 상태, LiDAR 중앙 거리, 깊이 신뢰도, 움직임 속도, 영상 선명도를 계산해 경고 문구를 만들고
 //  녹화 중 통계를 모은다. (Stray Scanner 포크에 추가된 파일) 프레임마다가 아니라 10 Hz 정도로 부른다.
+//  흔들림 경고는 FrameQuality.swift 의 예측값(노출 시간 × 움직임)으로 한다. 여기의 선명도는 썸네일 고르기와 통계용.
 //
 //  기준값 (2026-10-27 컵 녹화 분석): 깊이 중앙값 0.21 m 는 LiDAR 하한(0.25~0.3 m) 아래, 소형 물체는 0.4~0.8 m 권장,
 //  순간 속도 1.66 m/s 는 과함(0.3 m/s 이하 권장), 라플라시안 선명도가 자리 스캔의 1/3 → 모션블러.
@@ -39,8 +40,16 @@ struct CaptureStats: Codable, Hashable {
     /// 물체 모드: 방위 커버리지 % 와 고도 3단 %
     var coveragePct: Float? = nil
     var elevationBands: [String: Float]? = nil
-    /// 경고 종류별 샘플 수 (10 Hz): tracking, close, far, no_depth, fast, blur, low_confidence, object
+    /// 경고 종류별 샘플 수 (10 Hz): tracking, close, far, no_depth, fast, shake, low_confidence, object, tilt, in_place
     var warningCounts: [String: Int]? = nil
+    /// 예측 흔들림(가로 1920 px 기준)이 경고 기준(blurLimitPx) 이상인 프레임 비율과 중앙값 (FrameQualityMonitor)
+    var blurFrameRatio: Float? = nil
+    var blurMedianPx: Float? = nil
+    var blurLimitPx: Float? = nil
+    /// 녹화 중 트래킹이 normal 이 아니었던 시간 (초)
+    var trackingUnstableSeconds: Float? = nil
+    /// 제자리 회전 경고 횟수 (방 모드만)
+    var inPlaceRotations: Int? = nil
 
     var isPoor: Bool { !warnings.isEmpty }
 }
@@ -184,14 +193,10 @@ final class CaptureGuide {
             speedWarning = String(format: "너무 빠릅니다 (%.1f m/s) — 0.3 m/s 이하로 천천히", speedEMA)
         }
 
-        // 선명도 (상대값): 지금까지 최대의 40% 아래면 흐림
+        // 선명도 (상대값, 썸네일·통계용). 흔들림 경고는 FrameQualityMonitor 의 예측값으로 한다
         let sharpness = CaptureGuide.sharpness(frame.capturedImage)
         lastSharpness = sharpness
         sharpnessMax = max(sharpnessMax, sharpness)
-        var blurWarning: String?
-        if sharpnessMax > 0, sharpness < 0.4 * sharpnessMax {
-            blurWarning = "화면이 흐립니다 — 멈췄다가 천천히 움직이세요"
-        }
 
         if recording {
             if let d = depth { depthSamples.append(d) }
@@ -209,8 +214,6 @@ final class CaptureGuide {
                 }
             } else if speedWarning != nil {
                 counted = "fast"
-            } else if blurWarning != nil {
-                counted = "blur"
             } else if confidenceWarning != nil {
                 counted = "low_confidence"
             }
@@ -219,7 +222,7 @@ final class CaptureGuide {
             }
         }
 
-        let warning = trackingWarning ?? distanceWarning ?? speedWarning ?? blurWarning ?? confidenceWarning
+        let warning = trackingWarning ?? distanceWarning ?? speedWarning ?? confidenceWarning
         return CaptureGuidance(trackingText: trackingText, trackingOK: trackingOK, warning: warning,
                                centerDepth: depth, confidenceRatio: confidence, speed: speedEMA,
                                rotationSpeed: rotationEMA, sharpness: sharpness)
@@ -247,9 +250,6 @@ final class CaptureGuide {
         }
         if let c = avgConfidence, c < 0.5 {
             warnings.append(String(format: "깊이 신뢰도 낮음 — 높은 신뢰 비율 %.0f%%", c * 100))
-        }
-        if sharpnessMaxValue > 0, sharpnessMedian < 0.4 * sharpnessMaxValue {
-            warnings.append("영상이 흐린 프레임이 많음 — 모션블러")
         }
         return CaptureStats(samples: speedSamples.count, avgDistance: avgDepth, minDistance: minDepth,
                             avgSpeed: avgSpeed, maxSpeed: maxSpeed, speedOverLimitRatio: overLimit,

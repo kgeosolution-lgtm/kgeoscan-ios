@@ -47,6 +47,35 @@ jobs:
           sw_vers
           swift --version
 
+      # 색 점 미리보기 셰이더는 앱이 실행 중에 소스로 컴파일한다 → 여기서 같은 소스를 미리 컴파일해 오류를 잡는다
+      - name: Check Metal shader source (point preview)
+        run: |
+          set +e
+          OUT="$RUNNER_TEMP/points.metal"
+          awk '/^ *\/\/ kgeo-msl-begin/{f=1} f{print} /^ *\/\/ kgeo-msl-end/{f=0}' StrayScanner/Kgeo/PointCloudRenderer.swift > "$OUT"
+          echo "extracted $(wc -l < "$OUT") lines"
+          if ! xcrun -sdk iphoneos metal --version >/dev/null 2>&1; then
+            echo "Metal toolchain not found; downloading the component"
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          if ! xcrun -sdk iphoneos metal --version >/dev/null 2>&1; then
+            echo "::warning title=metal::Metal toolchain unavailable - shader source not checked"
+            exit 0
+          fi
+          xcrun -sdk iphoneos metal -c "$OUT" -o "$RUNNER_TEMP/points.air" > "$RUNNER_TEMP/metal.log" 2>&1
+          status=$?
+          cat "$RUNNER_TEMP/metal.log"
+          if [ $status -ne 0 ]; then
+            msg=$(grep -E "error" "$RUNNER_TEMP/metal.log" | head -12)
+            [ -n "$msg" ] || msg=$(head -20 "$RUNNER_TEMP/metal.log")
+            msg="${msg//'%'/'%25'}"
+            msg="${msg//$'\n'/'%0A'}"
+            msg="${msg//$'\r'/'%0D'}"
+            echo "::error title=metal shader::${msg:0:1500}"
+            exit 1
+          fi
+          echo "Metal shader OK"
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

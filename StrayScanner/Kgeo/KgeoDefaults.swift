@@ -49,6 +49,8 @@ enum KgeoDefaults {
     static let areaSurfaceKey = "kgeo.areaSurface"
     /// 면 촬영 정지 사진: silent (영상 프레임, 무음, 기본) | shutter (captureHighResolutionFrame, 셔터음)
     static let areaStillModeKey = "kgeo.areaStillMode"
+    /// 색 점 미리보기 EDL 음영 (기본 켬)
+    static let previewEDLKey = "kgeo.previewEDL"
 
     static var objectModeDefault: Bool {
         UserDefaults.standard.object(forKey: objectModeKey) == nil ? true : UserDefaults.standard.bool(forKey: objectModeKey)

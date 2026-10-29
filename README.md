@@ -46,6 +46,20 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   정점 색(가림 검사 포함)을 입혀 `preview/preview_mesh.ply` 로 저장한다(물체 모드는 구 안만). Object Capture 방식은 폰에서 만든 `model/*.obj` 를 보여 준다.
   촬영 요약(시간·프레임·거리·속도·깊이 신뢰·커버리지·경고 시간), 업로드 크기, 셀룰러 경고를 함께 보여 준다. 목록의 녹화 상세에서도 '3D 미리보기' 로 연다.
   설정의 '녹화 뒤 미리보기 없이 바로 업로드' 를 켜면 건너뛴다. `preview/` 는 업로드 zip 에서 빠진다.
+- **색 점 미리보기** ([PointCloudAccumulator.swift](StrayScanner/Kgeo/PointCloudAccumulator.swift), [PointCloudRenderer.swift](StrayScanner/Kgeo/PointCloudRenderer.swift)):
+  영상 녹화의 기본 미리보기. 녹화 중 깊이를 역투영해 원본 영상 색을 입힌 점을 복셀(1 cm, 물체 3 mm)로 평균해 `preview/points.ply` 로 저장하고,
+  Metal(MTKView)로 그린다: 점 지름 = 복셀 × 1.3 의 **월드 크기**(화면 반지름 1~24 px, 가까이 가면 구멍이 메워짐), **둥근 점**(`[[point_coord]]` 원 밖 버림),
+  **EDL 음영**(eye-dome lighting, 이웃 8개 log2 깊이 비교 후처리 한 패스, '음영' 토글 기본 켬). 셰이더는 실행 중에 소스로 컴파일하고
+  CI 가 같은 소스를 `xcrun metal` 로 미리 검사한다. Metal 을 못 쓰면 SceneKit 점(월드 크기, 네모, 음영 없음)으로 대신 보여 준다.
+- **촬영 품질 안내** ([FrameQuality.swift](StrayScanner/Kgeo/FrameQuality.swift), 2026-10-29): 프레임마다 연속 카메라 자세로 회전 ω·이동 v 를 구해
+  흔들림을 예측한다: `blur_px ≈ (|ω|·fx + |v|·fx / z) × 노출 시간`(가로 1920 px 영상 기준, z = 화면 중앙 깊이 중앙값).
+  6 px 이상이 0.5초 이어지면 '천천히' + 가벼운 햅틱(1초에 1번까지), 4 px 아래로 내려오면 해제(면 촬영은 4 → 2.7 px). 8 px 를 넘는 프레임은
+  색 점·색 키프레임·면 촬영 정지 사진에서 뺀다. 트래킹 제한(움직임 과다·특징 부족·위치 다시 찾기·초기화)은 짧은 한국어 안내.
+  방 모드는 최근 3초 동안 45° 넘게 돌았는데 0.3 m 도 안 움직였으면 '옆으로 걸으면서 찍어 주세요'. 위 오른쪽 거리 배지(방 1~2 m, 물체 0.35~0.9 m,
+  현장조사 0.4~1.5 m, 면 촬영은 정지 사진 기준 0.6 mm/px 가 되는 거리까지·mm/px 표시). 3분이 넘으면 나눠 찍기 권장(녹화는 계속).
+  발열이 serious 이상이면 색 점 수집 간격과 화면 갱신(30 → 15 fps)을 줄인다(녹화 데이터는 그대로). 촬영 요약에 흔들림 프레임 비율·중앙값,
+  추적 불안정 시간, 제자리 회전 경고 횟수(`capture_stats.blur_frame_ratio`, `blur_median_px`, `blur_limit_px`, `tracking_unstable_seconds`,
+  `in_place_rotations`). 프레임별 값은 `frame_quality.csv`(아래 형식 문서)로 업로드 zip 에 들어간다.
 - **물체 모드 고화질 사진** ([ObjectCaptureFlow.swift](StrayScanner/Kgeo/ObjectCaptureFlow.swift), iOS 17+, `ObjectCaptureSession.isSupported` 기기):
   현장조사 + 물체 모드에서 촬영 방식 '고화질 사진'(기본)을 고르면 Apple `ObjectCaptureView` 로 물체 찾기 → 자동 촬영 → 바퀴 완료 시
   '위에서 한 바퀴 더 / 물체를 뒤집고 / 촬영 끝내기' 를 고른다(한국어 안내·피드백). 끝나면 `PhotogrammetrySession` 으로 폰에서
