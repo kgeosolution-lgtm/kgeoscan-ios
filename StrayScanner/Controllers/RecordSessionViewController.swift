@@ -259,7 +259,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         sceneView.rendersCameraGrain = false
         sceneView.rendersMotionBlur = false
         sceneView.antialiasingMode = .none
-        sceneView.preferredFramesPerSecond = 30
+        sceneView.preferredFramesPerSecond = CaptureTuning.viewFPS
         sceneView.backgroundColor = .black
         sceneView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped(_:))))
     }
@@ -749,8 +749,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             } else {
                 text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
             }
-            if seconds >= 180 {
-                text += " · 3분 넘음"
+            if seconds >= CaptureTuning.longCaptureStart {
+                text += " · \(Int(CaptureTuning.longCaptureStart / 60))분 넘음"
             }
             if thermalThrottled {
                 text += " · 발열: 미리보기 수집 줄임"
@@ -951,7 +951,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         let quality = qualityMonitor.update(frame: frame, depth: blurDepth, recording: capturing)
         lastQuality = quality
-        if capturing, qualityMonitor.shaking, frame.timestamp - lastShakeHaptic >= 1.0 {
+        if capturing, qualityMonitor.shaking, frame.timestamp - lastShakeHaptic >= CaptureTuning.hapticInterval {
             lastShakeHaptic = frame.timestamp
             shakeHaptic.impactOccurred()
         }
@@ -981,17 +981,17 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     /// 색 점 미리보기 샘플: 0.25초마다, 또는 8 cm 이동·8° 회전 때 (최소 0.1초 간격, 앞 샘플을 합치는 중이면 건너뜀).
-    /// 흔들림 예측이 8 px 를 넘는 프레임은 빼고, 발열이 serious 이상이면 0.75초·20 cm·20° 로 늘린다
+    /// 흔들림 예측이 8 px 를 넘는 프레임은 빼고, 발열이 serious 이상이면 0.75초·20 cm·20° 로 늘린다 (값은 CaptureTuning)
     private func considerPointSample(frame: ARFrame) {
         guard let accumulator = pointAccumulator, frame.sceneDepth != nil else { return }
         guard case .normal = frame.camera.trackingState else { return }
-        if let quality = lastQuality, quality.blurPx > qualityMonitor.limits.accumulate {
+        if let quality = lastQuality, quality.blurPx > qualityMonitor.limits.skipAbove {
             return
         }
         let elapsed = frame.timestamp - lastPointSampleTime
-        guard elapsed >= (thermalThrottled ? 0.4 : 0.1) else { return }
+        guard elapsed >= (thermalThrottled ? CaptureTuning.hotPointMinInterval : CaptureTuning.pointMinInterval) else { return }
         let transform = frame.camera.transform
-        var due = elapsed >= (thermalThrottled ? 0.75 : 0.25)
+        var due = elapsed >= (thermalThrottled ? CaptureTuning.hotPointInterval : CaptureTuning.pointInterval)
         if !due, let last = lastPointSampleTransform {
             let moved = simd_distance(transform.columns.3, last.columns.3)
             let delta = simd_quatf(transform) * simd_quatf(last).inverse
@@ -999,7 +999,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if turned > 180 {
                 turned = 360 - turned
             }
-            due = moved >= (thermalThrottled ? 0.2 : 0.08) || turned >= (thermalThrottled ? 20 : 8)
+            due = moved >= (thermalThrottled ? CaptureTuning.hotPointMove : CaptureTuning.pointMove)
+                || turned >= (thermalThrottled ? CaptureTuning.hotPointTurn : CaptureTuning.pointTurn)
         }
         guard due else { return }
         var crop: PreviewCrop?
@@ -1053,7 +1054,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             }
             guard moved >= 0.12 || turned >= 10 else { return }
         }
-        let blurred = (lastQuality?.blurPx ?? 0) > qualityMonitor.limits.accumulate
+        let blurred = (lastQuality?.blurPx ?? 0) > qualityMonitor.limits.skipAbove
         if lastGuidanceSpeed > 0.5 || lastGuidanceRotation > 45 || blurred {
             if frame.timestamp - lastShakeSkipTime >= 1 {
                 lastShakeSkipTime = frame.timestamp
@@ -1219,10 +1220,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     /// 미리보기 정점 색용 키프레임 (트래킹 정상이고 흔들리지 않은 프레임만, 발열 때는 1.5초 이상 간격)
     private func considerColorKeyframe(frame: ARFrame) {
-        let interval = thermalThrottled ? max(keyframeInterval, 1.5) : keyframeInterval
+        let interval = thermalThrottled ? max(keyframeInterval, CaptureTuning.hotKeyframeInterval) : keyframeInterval
         guard meshSupported, frame.timestamp - lastKeyframeTime >= interval else { return }
         guard case .normal = frame.camera.trackingState else { return }
-        if let quality = lastQuality, quality.blurPx > qualityMonitor.limits.accumulate {
+        if let quality = lastQuality, quality.blurPx > qualityMonitor.limits.skipAbove {
             return
         }
         lastKeyframeTime = frame.timestamp
@@ -1385,14 +1386,16 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         let hot = state == .serious || state == .critical
         guard hot != thermalThrottled else { return }
         thermalThrottled = hot
-        sceneView.preferredFramesPerSecond = hot ? 15 : 30
+        sceneView.preferredFramesPerSecond = hot ? CaptureTuning.hotViewFPS : CaptureTuning.viewFPS
     }
 
-    /// 녹화 3분부터 2분마다 6초씩: 나눠 찍기 권장 (녹화는 멈추지 않는다)
+    /// 녹화 3분부터 2분마다 6초씩: 나눠 찍기 권장 (녹화는 멈추지 않는다, 값은 CaptureTuning)
     private func captureTimeNotice(capturing: Bool) -> String? {
         guard capturing, let began = captureStartedAt else { return nil }
         let elapsed = Date().timeIntervalSince(began)
-        guard elapsed >= 180, (elapsed - 180).truncatingRemainder(dividingBy: 120) < 6 else { return nil }
+        guard elapsed >= CaptureTuning.longCaptureStart,
+              (elapsed - CaptureTuning.longCaptureStart).truncatingRemainder(dividingBy: CaptureTuning.longCaptureRepeat)
+                < CaptureTuning.longCaptureShow else { return nil }
         let minutes = Int(elapsed / 60)
         if inPlaceCheck {
             return "\(minutes)분째 녹화 중 — 방 단위로 나눠 찍기를 권장합니다 (녹화는 계속됩니다)"
@@ -1408,18 +1411,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             stats.blurMedianPx = summary.medianBlur
             stats.blurLimitPx = limit
             stats.trackingUnstableSeconds = summary.unstableSeconds
-            if summary.blurredRatio > 0.2 {
+            if summary.blurredRatio > CaptureTuning.summaryBlurRatio {
                 stats.warnings.append(String(format: "흔들린 프레임 %.0f%% (%.0f px 이상) — 더 천천히, 특히 돌 때 천천히",
                                              summary.blurredRatio * 100, limit))
             }
-            if summary.unstableSeconds >= 3 {
+            if summary.unstableSeconds >= CaptureTuning.summaryUnstableSeconds {
                 stats.warnings.append(String(format: "추적 불안정 %.0f초 — 무늬가 있는 곳을 비추며 천천히",
                                              summary.unstableSeconds))
             }
         }
         if inPlaceCheck {
             stats.inPlaceRotations = rotationDetector.events
-            if rotationDetector.events >= 3 {
+            if rotationDetector.events >= CaptureTuning.summaryInPlaceCount {
                 stats.warnings.append("제자리 회전 \(rotationDetector.events)회 — 옆으로 걸으면서 찍어야 3D 가 잘 나옵니다")
             }
         }

@@ -53,11 +53,11 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   CI 가 같은 소스를 `xcrun metal` 로 미리 검사한다. Metal 을 못 쓰면 SceneKit 점(월드 크기, 네모, 음영 없음)으로 대신 보여 준다.
 - **촬영 품질 안내** ([FrameQuality.swift](StrayScanner/Kgeo/FrameQuality.swift), 2026-10-29): 프레임마다 연속 카메라 자세로 회전 ω·이동 v 를 구해
   흔들림을 예측한다: `blur_px ≈ (|ω|·fx + |v|·fx / z) × 노출 시간`(가로 1920 px 영상 기준, z = 화면 중앙 깊이 중앙값).
-  6 px 이상이 0.5초 이어지면 '천천히' + 가벼운 햅틱(1초에 1번까지), 4 px 아래로 내려오면 해제(면 촬영은 4 → 2.7 px). 8 px 를 넘는 프레임은
+  6 px 이상이 0.5초 넘게 이어지면 '천천히' + 가벼운 햅틱(1초에 1번까지), 4 px 아래로 0.5초 이상이면 해제(면 촬영은 4 → 2.7 px). 8 px 를 넘는 프레임은
   색 점·색 키프레임·면 촬영 정지 사진에서 뺀다. 트래킹 제한(움직임 과다·특징 부족·위치 다시 찾기·초기화)은 짧은 한국어 안내.
   방 모드는 최근 3초 동안 45° 넘게 돌았는데 0.3 m 도 안 움직였으면 '옆으로 걸으면서 찍어 주세요'. 위 오른쪽 거리 배지(방 1~2 m, 물체 0.35~0.9 m,
   현장조사 0.4~1.5 m, 면 촬영은 정지 사진 기준 0.6 mm/px 가 되는 거리까지·mm/px 표시). 3분이 넘으면 나눠 찍기 권장(녹화는 계속).
-  발열이 serious 이상이면 색 점 수집 간격과 화면 갱신(30 → 15 fps)을 줄인다(녹화 데이터는 그대로). 촬영 요약에 흔들림 프레임 비율·중앙값,
+  발열이 serious 이상이면 색 점 수집 간격과 화면 갱신(30 → 15 fps)을 줄인다(녹화 데이터는 그대로). 기준값은 모두 `CaptureTuning`(FrameQuality.swift 맨 위) 한곳에 있다. 촬영 요약에 흔들림 프레임 비율·중앙값,
   추적 불안정 시간, 제자리 회전 경고 횟수(`capture_stats.blur_frame_ratio`, `blur_median_px`, `blur_limit_px`, `tracking_unstable_seconds`,
   `in_place_rotations`). 프레임별 값은 `frame_quality.csv`(아래 형식 문서)로 업로드 zip 에 들어간다.
 - **물체 모드 고화질 사진** ([ObjectCaptureFlow.swift](StrayScanner/Kgeo/ObjectCaptureFlow.swift), iOS 17+, `ObjectCaptureSession.isSupported` 기기):
