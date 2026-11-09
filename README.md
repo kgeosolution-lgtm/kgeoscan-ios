@@ -89,6 +89,15 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   같은 비율로 환산한다(기본 형식에서는 원본과 같음). `hires/poses.json` 의 K 는 그 프레임의 `camera.intrinsics`(`intrinsics_source: "arframe"`),
   JPEG EXIF 에는 `ARFrame.exifData`(초점거리 등)와 Make/Model, Orientation 1. `meta.json` area 에 `hires_source`(video_frame|high_res_capture),
   `hires_format`("3840x2880@30" 등), `video_size`. 설정 → 면 촬영 사진(무음/셔터음), '카메라 형식 진단' 에서 이 기기 형식 표와 깊이 시험 결과를 복사할 수 있다.
+  **균열 근접 모드** (2026-11-09, 새 스캔 화면의 면 촬영 토글): 서버가 원본 정지 사진에서 균열 폭을 재도록 가까이·많이 겹치게 찍는다.
+  위 오른쪽 배지가 예상 해상도 `mm/px = z / 정지 사진 fx × 1000`(z = 화면 중앙 깊이 중앙값, fx 는 캡처 해상도에서 정지 사진 해상도로 환산 —
+  무음 4K 스틸은 캡처 그대로, 4K fx ≈ 2620 px 이면 30 cm 0.11 · 50 cm 0.19 · 1 m 0.38)를 0.25 이하 녹색(약 65 cm 이내), 0.4 이하 황색, 넘으면 적색으로,
+  권장 "벽에서 30~50 cm" 와 함께 보여 준다. 정지 사진 간격은 일반 면 촬영의 절반(6 cm·5°)이고 예측 흔들림 1.5 px(1920 기준) 이하일 때만 저장해,
+  조금 옮기고 잠깐 멈추면 찍힌다(찍힐 때 가벼운 진동). 거리·속도 경고는 0.25~0.8 m·0.25 m/s. `meta.json` area 에 `crack_mode: true`.
+  **균열 표시** ([CrackMarks.swift](StrayScanner/Kgeo/CrackMarks.swift), 면 촬영 녹화 중): 화면을 탭하면 ARKit raycast(추정 면 → 감지된 면) 또는
+  LiDAR 깊이로 그 자리의 월드 좌표를 구해 핀을 띄우고 진동한다. 길게 누르거나 '선' 버튼 뒤 두 점을 찍으면 균열 선분, '되돌리기' 는 마지막 표시를 지운다.
+  녹화를 마치면 `marks.json`(odometry.csv 와 같은 폴더, 같은 ARKit 월드 좌표, 형식 문서 참고)을 쓰고 표시가 없으면 만들지 않는다.
+  미리보기 요약에 "균열 표시 N개", `meta.json` area 에 `crack_marks`. 기준값은 모두 `CaptureTuning` 에 있다.
 - **목록·설정**: 썸네일(녹화 중 가장 선명한 프레임 `thumb.jpg`), 용량, 배지(미업로드/업로드 중/처리 중/완료/실패), 스와이프 삭제.
   설정(톱니): 서버 주소, 기본 스캔 유형·위치 입력, 녹화 뒤 자동 업로드, Wi-Fi 에서만 업로드, 백그라운드 전송(실험), 노출.
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,

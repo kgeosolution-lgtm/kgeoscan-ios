@@ -86,6 +86,34 @@ One row per saved frame, written by the same encoder queue as `odometry.csv`, so
 The app warns ("천천히") when `blur_px` stays at 6 or more for 0.5 s (4 in area mode) and leaves frames above 8 out of the
 on-phone point preview. The server can use the file to weight or drop frames; without it, processing is unchanged.
 
+## kgeoScan addition: `marks.json` (area capture, optional)
+
+Crack marks the user placed by tapping the screen while recording in area mode. It sits in the dataset folder next to
+`odometry.csv` and is only written when there is at least one mark. Coordinates are the same ARKit world frame as
+`odometry.csv` (metres, y up, origin = where tracking was reset at record start), rounded to 0.1 mm.
+
+```json
+{
+  "coord" : "arkit_world",
+  "marks" : [
+    {"frame" : 123, "id" : 1, "kind" : "crack", "label" : "", "source" : "raycast", "t" : 66351.18, "x" : 0.1234, "y" : 1.0456, "z" : -0.4321},
+    {"frame" : 150, "id" : 2, "kind" : "crack_line", "label" : "", "p0" : [0.1, 1.0, -0.43], "p1" : [0.2, 0.9, -0.43], "source" : "depth", "t" : 66352.6}
+  ],
+  "version" : 1
+}
+```
+
+| Field | Meaning |
+|---|---|
+| id | 1, 2, … in the order the marks were made (an undone mark leaves a gap) |
+| kind | `crack` (one point: `x`, `y`, `z`) or `crack_line` (two points: `p0`, `p1`, each `[x, y, z]`) |
+| t | ARFrame timestamp when the mark was made (for a line: when its end point was tapped), same time base as `odometry.csv` |
+| frame | Number of the last saved frame at that moment (`odometry.csv` `frame`) |
+| label | Free text, empty for now |
+| source | How the point was found: `raycast` (ARKit estimated or detected plane) or `depth` (LiDAR depth at that pixel). For a line, the less precise of its two points |
+
+Keys are written in alphabetical order; readers should not rely on key order.
+
 ## kgeoScan addition: `meta.json`
 
 kgeoScan (a fork of Stray Scanner) writes one extra file, `meta.json`, into the dataset folder. Everything above is unchanged.

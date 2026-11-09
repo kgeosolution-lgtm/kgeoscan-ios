@@ -49,6 +49,8 @@ enum KgeoDefaults {
     static let areaSurfaceKey = "kgeo.areaSurface"
     /// 면 촬영 정지 사진: silent (영상 프레임, 무음, 기본) | shutter (captureHighResolutionFrame, 셔터음)
     static let areaStillModeKey = "kgeo.areaStillMode"
+    /// 면 촬영 균열 근접 모드 (기본 끔)
+    static let areaCrackModeKey = "kgeo.areaCrackMode"
     /// 색 점 미리보기 EDL 음영 (기본 켬)
     static let previewEDLKey = "kgeo.previewEDL"
 

@@ -17,6 +17,7 @@ struct ScanSetupView: View {
     @AppStorage(KgeoDefaults.captureMethodKey) private var captureMethod: String = "objcap"
     @AppStorage(KgeoDefaults.surveyStyleKey) private var surveyStyle: String = "object"
     @AppStorage(KgeoDefaults.areaSurfaceKey) private var areaSurface: String = "auto"
+    @AppStorage(KgeoDefaults.areaCrackModeKey) private var areaCrackMode: Bool = false
     @State private var title: String = ScanSetupView.defaultTitle()
     @State private var note: String = ""
     @State private var validationMessage: String?
@@ -61,6 +62,12 @@ struct ScanSetupView: View {
                         Text(areaDescription)
                             .font(.caption)
                             .foregroundColor(.secondary)
+                        Toggle("균열 근접 모드", isOn: $areaCrackMode)
+                        if areaCrackMode {
+                            Text("벽에서 30~50 cm 로 가까이 찍어 서버가 균열 폭을 잽니다. 화면 위 오른쪽에 예상 해상도(mm/px)가 0.25 이하면 녹색, 0.4 이하 황색, 넘으면 적색으로 나옵니다. 사진은 6 cm 마다(일반의 절반) 흔들림이 아주 작을 때만 찍히니, 조금 옮기고 잠깐 멈추기를 반복하세요 (찍힐 때 가볍게 진동). 설정의 '빠른 셔터' 를 함께 쓰면 더 선명합니다.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     } else if surveyStyle == "plain" {
                         Text("일반 영상: 물체 자르기나 정사영상 없이 LiDAR 영상·깊이만 기록합니다.")
                             .font(.caption)
@@ -235,7 +242,7 @@ struct ScanSetupView: View {
         meta.objectMode = style == "object"
         if style == "area" {
             meta.capture = "area"
-            meta.area = AreaInfo(surface: areaSurface, hires: 0)
+            meta.area = AreaInfo(surface: areaSurface, hires: 0, crackMode: areaCrackMode ? true : nil)
         } else {
             let useObjectCapture = meta.objectMode == true && captureMethod == "objcap" && ObjcapSupport.isAvailable
             meta.capture = useObjectCapture ? "objcap" : "video"
@@ -261,7 +268,7 @@ struct ScanSetupView: View {
     }
 
     private var areaDescription: String {
-        let common = " 녹화하는 동안 12 cm 움직이거나 10° 돌 때마다 고해상도 사진(최대 200장)이 자동으로 찍혀, 서버가 정사영상(위·정면에서 본 실측 사진)을 만듭니다. 대상에서 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요. 사진 방식(무음/셔터음)은 설정에서 고릅니다."
+        let common = " 녹화하는 동안 12 cm 움직이거나 10° 돌 때마다 고해상도 사진(최대 200장)이 자동으로 찍혀, 서버가 정사영상(위·정면에서 본 실측 사진)을 만듭니다. 대상에서 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요. 녹화 중 균열을 탭하면 위치가 표시됩니다(길게 누르면 선). 사진 방식(무음/셔터음)은 설정에서 고릅니다."
         switch areaSurface {
         case "floor":
             return "바닥·트렌치: 폰을 아래로 향하게 기울여 위에서 내려다봅니다." + common

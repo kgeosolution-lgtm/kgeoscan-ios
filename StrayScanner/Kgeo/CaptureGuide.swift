@@ -74,6 +74,13 @@ final class CaptureGuide {
     static let area = Thresholds(minDistance: 0.4, maxDistance: 1.2, maxSpeed: 0.4, maxRotation: 40,
                                  tooCloseText: "대상 면에 너무 가깝습니다 (%.2f m) — 40 cm 이상 떨어지세요",
                                  tooFarText: "대상 면에서 너무 멉니다 (%.1f m) — 1.2 m 이내로")
+    /// 면 촬영 균열 근접 모드: 벽에서 30~50 cm, 더 천천히 (값은 CaptureTuning)
+    static let crack = Thresholds(minDistance: CaptureTuning.crackGuideMinDistance,
+                                  maxDistance: CaptureTuning.crackGuideMaxDistance,
+                                  maxSpeed: CaptureTuning.crackGuideMaxSpeed,
+                                  maxRotation: CaptureTuning.crackGuideMaxRotation,
+                                  tooCloseText: "너무 가깝습니다 (%.2f m) — 균열 근접은 30~50 cm",
+                                  tooFarText: "균열 근접 모드: 더 다가가세요 (%.1f m, 권장 30~50 cm)")
     /// 물체 모드: 물체까지 35~90 cm
     static let object = Thresholds(minDistance: 0.35, maxDistance: 0.9, maxSpeed: 0.5, maxRotation: 60,
                                    tooCloseText: "너무 가깝습니다 (%.2f m) — 35 cm 이상 떨어지세요",

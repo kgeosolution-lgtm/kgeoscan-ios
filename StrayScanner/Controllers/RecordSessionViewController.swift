@@ -20,6 +20,9 @@
 //  - 촬영 품질 (FrameQuality.swift): 프레임마다 흔들림을 예측해 '천천히' + 가벼운 햅틱(1초에 1번까지), 흔들린 프레임은
 //    색 점 미리보기 누적에서 빼고 frame_quality.csv 로 남긴다. 방 모드 제자리 회전 경고, 모드별 거리 배지,
 //    3분 경과 안내(녹화는 계속), 발열(serious 이상) 때 미리보기 수집 간격·화면 갱신 줄이기, 촬영 요약 통계.
+//  - 면 촬영 균열 근접 모드: 예상 해상도(mm/px) 배지 녹색·황색·적색, 벽에서 30~50 cm, 정지 사진 간격 절반,
+//    흔들림이 작을 때만 정지 사진 (+ 찍힐 때 가벼운 진동). 녹화 중 화면 탭 = 균열 표시(핀), 길게 누르기 또는 '선' = 두 점 선분,
+//    '되돌리기' = 마지막 표시 지우기 → marks.json (CrackMarks.swift).
 //  녹화 데이터(DatasetEncoder 이하)는 원본 그대로다.
 //
 
@@ -171,6 +174,27 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     /// 면 촬영 셔터음 방식의 정지 사진 가로 px (첫 사진에서 알게 된다)
     private var hiresStillWidth: Int?
 
+    // 면 촬영 균열 근접 모드와 균열 표시 (CrackMarks.swift)
+    private var crackMode = false
+    private var crackMarks: [CrackMark] = []
+    /// crackMarks 와 같은 순서의 화면 노드 (되돌리기용)
+    private var markNodes: [SCNNode] = []
+    private var nextMarkID = 1
+    private enum LineStage {
+        case off
+        case needStart
+        case needEnd(start: SIMD3<Float>, source: String, node: SCNNode)
+    }
+    private var lineStage: LineStage = .off
+    private let markLineButton = UIButton(type: .system)
+    private let markUndoButton = UIButton(type: .system)
+    private var markRow: UIStackView?
+    private let markHaptic = UIImpactFeedbackGenerator(style: .medium)
+    private let stillHaptic = UISelectionFeedbackGenerator()
+    /// 탭 결과처럼 잠깐 보여 줄 안내 (10 Hz 안내 갱신이 바로 덮어쓰지 않게)
+    private var noticeText: String?
+    private var noticeUntil = Date.distantPast
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -189,8 +213,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         objectMode = scanMeta?.objectMode ?? false
         areaMode = scanMeta?.capture == "area"
         areaSurface = scanMeta?.area?.surface ?? "auto"
+        crackMode = areaMode && scanMeta?.area?.crackMode == true
         if areaMode {
-            guide.thresholds = CaptureGuide.area
+            guide.thresholds = crackMode ? CaptureGuide.crack : CaptureGuide.area
         } else if objectMode {
             guide.thresholds = CaptureGuide.object
         } else {
@@ -202,6 +227,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         setupOverlayViews()
         if objectMode {
             setupObjectViews()
+        }
+        if areaMode {
+            setupMarkViews()
         }
         setViewProperties()
         session.delegate = self
@@ -261,7 +289,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         sceneView.antialiasingMode = .none
         sceneView.preferredFramesPerSecond = CaptureTuning.viewFPS
         sceneView.backgroundColor = .black
-        sceneView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(viewTapped(_:))))
+        let tap = UITapGestureRecognizer(target: self, action: #selector(viewTapped(_:)))
+        if areaMode {
+            // 면 촬영: 길게 누르면 균열 선의 시작점
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(viewLongPressed(_:)))
+            longPress.minimumPressDuration = CaptureTuning.markLongPress
+            tap.require(toFail: longPress)
+            sceneView.addGestureRecognizer(longPress)
+        }
+        sceneView.addGestureRecognizer(tap)
     }
 
     private func setupOverlayViews() {
@@ -369,6 +405,29 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             self.haptic.notificationOccurred(.success)
             self.ringView.complete = true
         }
+    }
+
+    /// 면 촬영 균열 표시 버튼 [선] [되돌리기] (녹화 중에만 보인다)
+    private func setupMarkViews() {
+        styleButton(markLineButton, title: "선")
+        markLineButton.addTarget(self, action: #selector(markLineTapped), for: .touchUpInside)
+        styleButton(markUndoButton, title: "되돌리기")
+        markUndoButton.addTarget(self, action: #selector(markUndoTapped), for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [markLineButton, markUndoButton])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.axis = .horizontal
+        row.spacing = 8
+        row.alignment = .center
+        row.isHidden = true
+        view.addSubview(row)
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            row.bottomAnchor.constraint(equalTo: statsLabel.topAnchor, constant: -8),
+        ])
+        markRow = row
+        markHaptic.prepare()
+        stillHaptic.prepare()
     }
 
     private func setViewProperties() {
@@ -491,6 +550,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         rotationDetector.reset()
         lastQuality = nil
         lastShakeHaptic = 0
+        clearMarks()
         self.startedRecording = Date()
         updateTime()
         updateLabelTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
@@ -548,6 +608,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         guide.resetStats()
         qualityMonitor.resetStats()
         rotationDetector.reset()
+        markRow?.isHidden = false
+        updateMarkButtons()
         startRawIMU()
     }
 
@@ -581,6 +643,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         updateLabelTimer?.invalidate()
         updateLabelTimer = nil
         statsLabel.isHidden = true
+        markRow?.isHidden = true
+        cancelPendingLine()
         // Stop IMU updates
         stopRawIMU()
         guard let encoder = datasetEncoder else {
@@ -624,6 +688,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func finishRecording(started: Date, encoder: DatasetEncoder, directory: URL, stats: CaptureStats,
                                  mesh: MeshSnapshot?) {
+        // 균열 표시가 있으면 marks.json (odometry.csv 와 같은 폴더, 같은 ARKit 월드 좌표)
+        if areaMode && !crackMarks.isEmpty {
+            do {
+                try CrackMarks.write(crackMarks, to: directory)
+            } catch {
+                print("marks.json 저장 실패: \(error.localizedDescription)")
+            }
+        }
         saveRecording(started, encoder)
         writeMeta(started: started, encoder: encoder, directory: directory, stats: stats)
         if let accumulator = pointAccumulator {
@@ -683,7 +755,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             meta.capture = "area"
             meta.area = AreaInfo(surface: areaSurface, hires: hiresWritten, hiresSkipped: hiresSkipped,
                                  hiresFormatRecommended: hiresFormatRecommended, hiresSource: hiresSourceName,
-                                 hiresFormat: hiresFormatLabel, videoSize: videoSizeText)
+                                 hiresFormat: hiresFormatLabel, videoSize: videoSizeText,
+                                 crackMode: crackMode ? true : nil,
+                                 crackMarks: crackMarks.isEmpty ? nil : crackMarks.count)
         } else {
             meta.capture = "video"
         }
@@ -749,6 +823,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             } else {
                 text = String(format: "%d 프레임 · ≈%.0f MB", frames, megabytes)
             }
+            if !crackMarks.isEmpty {
+                text += " · 표시 \(crackMarks.count)"
+            }
             if seconds >= CaptureTuning.longCaptureStart {
                 text += " · \(Int(CaptureTuning.longCaptureStart / 60))분 넘음"
             }
@@ -764,6 +841,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     @objc func viewTapped(_ gesture: UITapGestureRecognizer) {
         if objectMode {
             designateObject(at: gesture.location(in: sceneView))
+        } else if areaMode {
+            handleMarkTap(at: gesture.location(in: sceneView))
         } else {
             toggleOverlay()
         }
@@ -836,19 +915,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func performDesignation(at point: CGPoint) {
         guard let frame = session.currentFrame else { return }
-        var center: simd_float3?
-        if let query = sceneView.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .any),
-           let hit = session.raycast(query).first {
-            center = simd_make_float3(hit.worldTransform.columns.3)
-        } else if let query = sceneView.raycastQuery(from: point, allowing: .existingPlaneGeometry, alignment: .any),
-                  let hit = session.raycast(query).first {
-            center = simd_make_float3(hit.worldTransform.columns.3)
-        } else if let depthPoint = unproject(viewPoint: point, frame: frame) {
-            center = depthPoint
-        }
-        guard let c = center else {
-            guideLabel.text = "물체를 찾지 못했습니다 — 조금 더 가까이에서 다시 탭하세요"
-            guideLabel.isHidden = false
+        guard let c = worldPoint(at: point, frame: frame)?.position else {
+            showNotice("물체를 찾지 못했습니다 — 조금 더 가까이에서 다시 탭하세요")
             return
         }
         objectTracker.setCenter(c, setBy: "tap")
@@ -860,6 +928,22 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         objectButton.setTitle("물체 해제", for: .normal)
         haptic.prepare()
         updateRing()
+    }
+
+    /// 화면 점의 월드 좌표: ARKit raycast(추정 면 → 감지된 면) → LiDAR 깊이 역투영. source = raycast | depth
+    private func worldPoint(at point: CGPoint, frame: ARFrame) -> (position: simd_float3, source: String)? {
+        if let query = sceneView.raycastQuery(from: point, allowing: .estimatedPlane, alignment: .any),
+           let hit = session.raycast(query).first {
+            return (simd_make_float3(hit.worldTransform.columns.3), "raycast")
+        }
+        if let query = sceneView.raycastQuery(from: point, allowing: .existingPlaneGeometry, alignment: .any),
+           let hit = session.raycast(query).first {
+            return (simd_make_float3(hit.worldTransform.columns.3), "raycast")
+        }
+        if let depthPoint = unproject(viewPoint: point, frame: frame) {
+            return (depthPoint, "depth")
+        }
+        return nil
     }
 
     /// 깊이맵으로 화면 점을 3D 로 되돌린다 (레이캐스트 실패 시)
@@ -1043,7 +1127,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private func considerHighResolution(frame: ARFrame) {
         guard areaMode, hiresAccepting, !hiresInFlight, hiresCount < HiresRecorder.maxShots else { return }
         guard case .normal = frame.camera.trackingState else { return }
-        guard frame.timestamp - lastHiresRequestTime >= 0.4 else { return }
+        guard frame.timestamp - lastHiresRequestTime >= CaptureTuning.hiresMinInterval else { return }
         let transform = frame.camera.transform
         if let last = lastHiresTransform {
             let moved = simd_distance(transform.columns.3, last.columns.3)
@@ -1052,10 +1136,16 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if turned > 180 {
                 turned = 360 - turned
             }
-            guard moved >= 0.12 || turned >= 10 else { return }
+            // 균열 근접 모드는 간격을 절반으로 (겹침을 늘린다)
+            let minMove = crackMode ? CaptureTuning.crackHiresMove : CaptureTuning.hiresMove
+            let minTurn = crackMode ? CaptureTuning.crackHiresTurn : CaptureTuning.hiresTurn
+            guard moved >= minMove || turned >= minTurn else { return }
         }
-        let blurred = (lastQuality?.blurPx ?? 0) > qualityMonitor.limits.skipAbove
-        if lastGuidanceSpeed > 0.5 || lastGuidanceRotation > 45 || blurred {
+        // 균열 근접 모드는 흔들림이 아주 작을 때만 (옮기고 잠깐 멈추면 찍힌다)
+        let blurLimit = crackMode ? CaptureTuning.crackStillMaxBlur : qualityMonitor.limits.skipAbove
+        let blurred = (lastQuality?.blurPx ?? 0) > blurLimit
+        if lastGuidanceSpeed > CaptureTuning.hiresSkipSpeed || lastGuidanceRotation > CaptureTuning.hiresSkipRotation
+            || blurred {
             if frame.timestamp - lastShakeSkipTime >= 1 {
                 lastShakeSkipTime = frame.timestamp
                 hiresSkipped += 1
@@ -1069,6 +1159,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             hiresCount += 1
             lastHiresTransform = transform
             recorder.add(frame: frame, index: hiresCount, source: "video_frame")
+            if crackMode {
+                stillHaptic.selectionChanged()
+            }
             return
         }
         hiresInFlight = true
@@ -1095,6 +1188,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             hiresFormatLabel = "\(CVPixelBufferGetWidth(frame.capturedImage))x\(CVPixelBufferGetHeight(frame.capturedImage)) still"
         }
         recorder.add(frame: frame, index: hiresCount, source: "high_res_capture")
+        if crackMode {
+            stillHaptic.selectionChanged()
+        }
     }
 
     private var areaSilentRequested: Bool {
@@ -1207,7 +1303,21 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     }
 
     private func areaHint() -> String {
-        let count = hiresCount > 0 ? " · 고해상도 \(hiresCount)장" : ""
+        var count = hiresCount > 0 ? " · 고해상도 \(hiresCount)장" : ""
+        if !crackMarks.isEmpty {
+            count += " · 균열 표시 \(crackMarks.count)개"
+        }
+        if crackMode {
+            let near = Int((CaptureTuning.crackAdviceNear * 100).rounded())
+            let far = Int((CaptureTuning.crackAdviceFar * 100).rounded())
+            let step = Int((CaptureTuning.crackHiresMove * 100).rounded())
+            let marking = startedRecording != nil ? " 균열을 탭하면 표시, 길게 누르면 선." : ""
+            return "균열 근접: \(crackSurfaceWord)에서 \(near)~\(far) cm, \(step) cm 옮길 때마다 잠깐 멈추면 선명한 사진이 찍힙니다."
+                + marking + count
+        }
+        if startedRecording != nil {
+            count += " · 탭: 균열 표시"
+        }
         switch areaSurface {
         case "floor":
             return "폰을 아래로 향해 바닥(트렌치)을 내려다보며 40 cm~1.2 m 거리로 천천히 지그재그로 겹치게 훑으세요" + count
@@ -1289,8 +1399,12 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if awaitingFrameFix { return }
 
         var text: String?
+        var isNotice = false
         if !guidance.trackingOK {
             text = guidance.warning
+        } else if let notice = activeNotice() {
+            text = notice
+            isNotice = true
         } else if capturing, qualityMonitor.shaking {
             text = String(format: "천천히 — 흔들림 %.0f px", lastQuality?.blurPx ?? 0)
             guide.countWarning("shake")
@@ -1335,9 +1449,168 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         guideLabel.text = text
         guideLabel.isHidden = (text == nil)
-        guideLabel.backgroundColor = isWarning
-            ? UIColor.systemOrange.withAlphaComponent(0.9)
-            : UIColor.black.withAlphaComponent(0.55)
+        if isNotice {
+            guideLabel.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.85)
+        } else {
+            guideLabel.backgroundColor = isWarning
+                ? UIColor.systemOrange.withAlphaComponent(0.9)
+                : UIColor.black.withAlphaComponent(0.55)
+        }
+    }
+
+    // MARK: - 균열 표시 (면 촬영 녹화 중)
+
+    /// 녹화가 시작돼 월드 원점이 고정된 뒤에만 표시한다 (좌표 = odometry.csv 와 같은 월드)
+    private var markingActive: Bool {
+        areaMode && startedRecording != nil && !awaitingTracking
+    }
+
+    /// marks.json 의 frame: 마지막으로 저장된 프레임 번호
+    private var currentFrameNumber: Int {
+        max(0, (datasetEncoder?.savedFrameCount ?? 1) - 1)
+    }
+
+    private var crackSurfaceWord: String {
+        switch areaSurface {
+        case "wall":
+            return "벽"
+        case "floor":
+            return "바닥"
+        default:
+            return "면"
+        }
+    }
+
+    private func handleMarkTap(at point: CGPoint) {
+        guard markingActive else {
+            showNotice("녹화를 시작한 뒤 균열을 탭하면 위치가 표시됩니다 (길게 누르면 선)")
+            return
+        }
+        guard let frame = session.currentFrame, let hit = worldPoint(at: point, frame: frame) else {
+            showNotice("그 자리의 위치를 찾지 못했습니다 — 조금 더 가까이에서 다시 탭하세요")
+            return
+        }
+        switch lineStage {
+        case .off:
+            let mark = CrackMarks.point(id: nextMarkID, at: hit.position, t: frame.timestamp,
+                                        frame: currentFrameNumber, source: hit.source)
+            addMark(mark, node: CrackMarks.makePinNode(at: hit.position, color: .systemPink))
+        case .needStart:
+            beginLine(at: hit.position, source: hit.source)
+        case .needEnd(let start, let startSource, let startNode):
+            startNode.removeFromParentNode()
+            lineStage = .off
+            let source = startSource == "raycast" && hit.source == "raycast" ? "raycast" : "depth"
+            let mark = CrackMarks.line(id: nextMarkID, from: start, to: hit.position, t: frame.timestamp,
+                                       frame: currentFrameNumber, source: source)
+            addMark(mark, node: CrackMarks.makeLineNode(from: start, to: hit.position, color: .systemYellow))
+        }
+    }
+
+    private func addMark(_ mark: CrackMark, node: SCNNode) {
+        nextMarkID += 1
+        crackMarks.append(mark)
+        sceneView.scene.rootNode.addChildNode(node)
+        markNodes.append(node)
+        markHaptic.impactOccurred()
+        showNotice((mark.kind == "crack_line" ? "균열 선 표시" : "균열 표시") + " — 모두 \(crackMarks.count)개")
+        updateMarkButtons()
+    }
+
+    /// 선의 시작점 (흰 핀). 다음 탭이 끝점
+    private func beginLine(at position: SIMD3<Float>, source: String) {
+        cancelPendingLine()
+        let node = CrackMarks.makePinNode(at: position, color: .white)
+        sceneView.scene.rootNode.addChildNode(node)
+        lineStage = .needEnd(start: position, source: source, node: node)
+        markHaptic.impactOccurred()
+        showNotice("선: 균열의 다른 쪽 끝을 탭하세요")
+        updateMarkButtons()
+    }
+
+    /// 찍다 만 선 (시작점 핀) 을 지운다
+    private func cancelPendingLine() {
+        if case .needEnd(_, _, let node) = lineStage {
+            node.removeFromParentNode()
+        }
+        lineStage = .off
+    }
+
+    private func clearMarks() {
+        cancelPendingLine()
+        for node in markNodes {
+            node.removeFromParentNode()
+        }
+        markNodes = []
+        crackMarks = []
+        nextMarkID = 1
+        updateMarkButtons()
+    }
+
+    @objc private func viewLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, areaMode else { return }
+        guard markingActive else {
+            showNotice("녹화를 시작한 뒤 길게 누르면 균열 선의 시작점이 됩니다")
+            return
+        }
+        guard let frame = session.currentFrame,
+              let hit = worldPoint(at: gesture.location(in: sceneView), frame: frame) else {
+            showNotice("그 자리의 위치를 찾지 못했습니다 — 조금 더 가까이에서 다시 눌러 주세요")
+            return
+        }
+        beginLine(at: hit.position, source: hit.source)
+    }
+
+    @objc private func markLineTapped() {
+        switch lineStage {
+        case .off:
+            lineStage = .needStart
+            showNotice("선: 균열의 한쪽 끝을 탭하세요")
+            updateMarkButtons()
+        case .needStart, .needEnd:
+            cancelPendingLine()
+            updateMarkButtons()
+        }
+    }
+
+    @objc private func markUndoTapped() {
+        switch lineStage {
+        case .needStart, .needEnd:
+            cancelPendingLine()
+            showNotice("선 그리기를 취소했습니다")
+        case .off:
+            guard !crackMarks.isEmpty else { return }
+            crackMarks.removeLast()
+            markNodes.removeLast().removeFromParentNode()
+            showNotice("마지막 표시를 지웠습니다 — 남은 표시 \(crackMarks.count)개")
+        }
+        updateMarkButtons()
+    }
+
+    private func updateMarkButtons() {
+        switch lineStage {
+        case .off:
+            markLineButton.setTitle("선", for: .normal)
+        case .needStart:
+            markLineButton.setTitle("선: 첫 점", for: .normal)
+        case .needEnd:
+            markLineButton.setTitle("선: 끝점", for: .normal)
+        }
+        markUndoButton.setTitle(crackMarks.isEmpty ? "되돌리기" : "되돌리기 (\(crackMarks.count))", for: .normal)
+    }
+
+    /// 잠깐(CaptureTuning.noticeSeconds) 보여 주는 파란 안내
+    private func showNotice(_ text: String) {
+        noticeText = text
+        noticeUntil = Date().addingTimeInterval(CaptureTuning.noticeSeconds)
+        guideLabel.text = text
+        guideLabel.isHidden = false
+        guideLabel.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.85)
+    }
+
+    private func activeNotice() -> String? {
+        guard let text = noticeText, Date() < noticeUntil else { return nil }
+        return text
     }
 
     /// 거리 배지: 화면 중앙 깊이(물체 모드는 물체까지)를 모드별 권장 범위와 비교 (방 1~2 m, 물체 0.35~0.9 m,
@@ -1345,28 +1618,39 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private func updateDistanceBadge(frame: ARFrame, depth: Float?) {
         var distance = depth
         var prefix = ""
-        let band: DistanceAdvice.Band
-        if areaMode {
-            band = DistanceAdvice.area(stillFx: areaStillFx(frame: frame))
-        } else if objectMode {
-            band = DistanceAdvice.object
-            if objectTracker.isSet {
-                distance = objectTracker.distance
-                prefix = "물체 "
-            }
-        } else if (scanMeta?.mode ?? .home) == .survey {
-            band = DistanceAdvice.survey
+        let advice: DistanceAdvice
+        if areaMode && crackMode {
+            // 균열 근접: 예상 해상도 mm/px (정지 사진 fx 기준) 로 색
+            advice = DistanceAdvice.crack(distance: depth, stillFx: areaStillFx(frame: frame), surface: crackSurfaceWord)
         } else {
-            band = DistanceAdvice.room
+            let band: DistanceAdvice.Band
+            if areaMode {
+                band = DistanceAdvice.area(stillFx: areaStillFx(frame: frame))
+            } else if objectMode {
+                band = DistanceAdvice.object
+                if objectTracker.isSet {
+                    distance = objectTracker.distance
+                    prefix = "물체 "
+                }
+            } else if (scanMeta?.mode ?? .home) == .survey {
+                band = DistanceAdvice.survey
+            } else {
+                band = DistanceAdvice.room
+            }
+            advice = DistanceAdvice.evaluate(distance: distance, band: band)
         }
-        let advice = DistanceAdvice.evaluate(distance: distance, band: band)
         distanceLabel.text = prefix + advice.text
-        switch advice.state {
-        case .good:
+        distanceLabel.textColor = advice.tone == .yellow ? .black : .white
+        switch advice.tone {
+        case .green:
             distanceLabel.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.8)
-        case .near, .far:
+        case .yellow:
+            distanceLabel.backgroundColor = UIColor.systemYellow.withAlphaComponent(0.9)
+        case .orange:
             distanceLabel.backgroundColor = UIColor.systemOrange.withAlphaComponent(0.85)
-        case .unknown:
+        case .red:
+            distanceLabel.backgroundColor = UIColor.systemRed.withAlphaComponent(0.85)
+        case .gray:
             distanceLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
         }
     }

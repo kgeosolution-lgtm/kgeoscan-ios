@@ -431,6 +431,12 @@ struct PreviewView: View {
                 }
                 if let area = meta.area {
                     LabeledContent("방식", value: "면 촬영 (정사영상) · \(PreviewView.surfaceLabel(area.surface))")
+                    if area.crackMode == true {
+                        LabeledContent("균열 근접 모드", value: "켬 (30~50 cm, 사진 간격 절반)")
+                    }
+                    if let marks = area.crackMarks, marks > 0 {
+                        LabeledContent("균열 표시", value: "\(marks)개")
+                    }
                     if let source = area.hiresSource {
                         LabeledContent("정지 사진", value: (source == "video_frame" ? "무음 (영상 프레임)" : "고해상도 사진 (셔터음)")
                                        + (area.hiresFormat.map { " · \($0)" } ?? ""))

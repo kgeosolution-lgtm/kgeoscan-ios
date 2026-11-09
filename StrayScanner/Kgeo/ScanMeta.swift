@@ -103,6 +103,10 @@ struct AreaInfo: Codable, Hashable {
     var hiresFormat: String?
     /// rgb.mp4 크기 ("1920x1440")
     var videoSize: String?
+    /// 균열 근접 모드 (벽에서 30~50 cm, 정지 사진 간격 절반, 예상 해상도 표시). 켰을 때만 true
+    var crackMode: Bool?
+    /// 녹화 중 화면을 탭해 남긴 균열 표시 수 (marks.json). 없으면 nil
+    var crackMarks: Int?
 }
 
 /// Object Capture 기록 (meta.json 의 objcap)
@@ -174,7 +178,7 @@ struct ScanMeta: Codable, Hashable {
         copy.objectMode = objectMode
         copy.capture = capture
         if let area = area {
-            copy.area = AreaInfo(surface: area.surface, hires: 0)
+            copy.area = AreaInfo(surface: area.surface, hires: 0, crackMode: area.crackMode)
         }
         return copy
     }

@@ -12,7 +12,8 @@
 //  - FrameQualityWriter: 녹화 폴더의 frame_quality.csv (frame,timestamp,blur_px,tracking,omega_dps,speed_mps).
 //      frame 은 odometry.csv · depth/ · rgb.mp4 와 같은 번호다. 서버가 흔들린·추적 불량 프레임을 덜 쓰는 데 쓴다.
 //  - InPlaceRotationDetector: 최근 3초 동안 방향은 45° 넘게 바뀌었는데 위치는 0.3 m 안이면 '제자리 회전' (방 모드).
-//  - DistanceAdvice: 화면 중앙 깊이로 모드별 권장 거리 배지 (면 촬영은 정지 사진 0.6 mm/px 기준).
+//  - DistanceAdvice: 화면 중앙 깊이로 모드별 권장 거리 배지 (면 촬영은 정지 사진 0.6 mm/px 기준,
+//      균열 근접 모드는 예상 해상도 mm/px 를 0.25 / 0.4 기준으로 녹색·황색·적색).
 //  (Stray Scanner 포크에 추가된 파일)
 //
 
@@ -61,6 +62,44 @@ enum CaptureTuning {
     static let areaNear: Float = 0.4
     static let areaFarCap: Float = 1.2
     static let areaTargetGSD: Float = 0.0006
+
+    // MARK: 면 촬영 정지 사진 (hires/)
+    /// 마지막 사진보다 12 cm 이동 또는 10° 회전, 최소 0.4초 간격
+    static let hiresMove: Float = 0.12
+    static let hiresTurn: Float = 10
+    static let hiresMinInterval: TimeInterval = 0.4
+    /// 흔들리면 건너뜀: CaptureGuide 속도 0.5 m/s 또는 회전 45°/s 초과, 예측 흔들림 blurSkipAbove 초과
+    static let hiresSkipSpeed: Float = 0.5
+    static let hiresSkipRotation: Float = 45
+
+    // MARK: 균열 근접 모드 (면 촬영 옵션, 4K 무음 스틸 fx ≈ 2620 px: 30 cm 0.11 · 50 cm 0.19 · 1 m 0.38 mm/px)
+    /// 정지 사진 간격: 일반 면 촬영의 절반 (겹침을 늘린다)
+    static let crackHiresMove: Float = 0.06
+    static let crackHiresTurn: Float = 5
+    /// 정지 사진은 예측 흔들림이 이 값 이하일 때만 저장 (가로 1920 기준, 4K 스틸에서는 2배) — 옮기고 잠깐 멈추면 찍힌다
+    static let crackStillMaxBlur: Float = 1.5
+    /// 예상 해상도(mm/px = z / 정지 사진 fx × 1000) 색: 0.25 이하 녹색(약 65 cm 이내), 0.4 이하 황색, 넘으면 적색
+    static let crackGSDGood: Float = 0.25
+    static let crackGSDFair: Float = 0.4
+    /// 권장 거리 문구 "벽에서 30~50 cm" (m)
+    static let crackAdviceNear: Float = 0.3
+    static let crackAdviceFar: Float = 0.5
+    /// 이보다 가까우면 '너무 가까움' (LiDAR 최소 거리 근처)
+    static let crackTooClose: Float = 0.25
+    /// 거리·속도·회전 경고 (CaptureGuide.crack)
+    static let crackGuideMinDistance: Float = 0.25
+    static let crackGuideMaxDistance: Float = 0.8
+    static let crackGuideMaxSpeed: Float = 0.25
+    static let crackGuideMaxRotation: Float = 30
+
+    // MARK: 균열 표시 (면 촬영 녹화 중 화면 탭)
+    /// 화면의 핀(구) 반지름, 선분(원기둥) 반지름 (m)
+    static let markPinRadius: Float = 0.008
+    static let markLineRadius: Float = 0.002
+    /// 길게 누르면 선의 시작점 (초)
+    static let markLongPress: TimeInterval = 0.5
+    /// 탭 결과 안내를 보여 주는 시간 (초)
+    static let noticeSeconds: TimeInterval = 1.5
 
     // MARK: 긴 녹화 안내
     /// 3분부터 2분마다 6초씩 '나눠 찍기 권장' (녹화는 계속)
@@ -367,11 +406,13 @@ final class InPlaceRotationDetector {
 
 /// 거리 배지: 화면 중앙 깊이(물체 모드는 물체까지)를 모드별 권장 범위와 비교
 struct DistanceAdvice {
-    enum State {
-        case good
-        case near
-        case far
-        case unknown
+    /// 배지 색
+    enum Tone {
+        case green
+        case yellow
+        case orange
+        case red
+        case gray
     }
 
     struct Band {
@@ -392,12 +433,12 @@ struct DistanceAdvice {
         return Band(near: CaptureTuning.areaNear, far: far, stillFx: stillFx)
     }
 
-    let state: State
+    let tone: Tone
     let text: String
 
     static func evaluate(distance: Float?, band: Band) -> DistanceAdvice {
         guard let d = distance, d.isFinite, d > 0 else {
-            return DistanceAdvice(state: .unknown, text: "거리 —")
+            return DistanceAdvice(tone: .gray, text: "거리 —")
         }
         var text = String(format: "거리 %.2f m", d)
         if let fx = band.stillFx, fx > 0 {
@@ -405,11 +446,33 @@ struct DistanceAdvice {
         }
         let range = String(format: "%g~%g m", band.near, band.far)
         if d < band.near {
-            return DistanceAdvice(state: .near, text: text + " · 가까움 (" + range + ")")
+            return DistanceAdvice(tone: .orange, text: text + " · 가까움 (" + range + ")")
         }
         if d > band.far {
-            return DistanceAdvice(state: .far, text: text + " · 멂 (" + range + ")")
+            return DistanceAdvice(tone: .orange, text: text + " · 멂 (" + range + ")")
         }
-        return DistanceAdvice(state: .good, text: text + " · 좋음")
+        return DistanceAdvice(tone: .green, text: text + " · 좋음")
+    }
+
+    /// 균열 근접 모드: 예상 해상도 mm/px = z / 정지 사진 fx × 1000 (fx 는 캡처 해상도에서 정지 사진 해상도로 환산한 값).
+    /// 0.25 이하 녹색, 0.4 이하 황색, 넘으면 적색. 25 cm 보다 가까우면 황색 '너무 가까움'. surface = 벽 | 바닥 | 면
+    static func crack(distance: Float?, stillFx: Float, surface: String) -> DistanceAdvice {
+        let range = "\(surface)에서 \(Int((CaptureTuning.crackAdviceNear * 100).rounded()))~"
+            + "\(Int((CaptureTuning.crackAdviceFar * 100).rounded())) cm"
+        guard let d = distance, d.isFinite, d > 0, stillFx > 0 else {
+            return DistanceAdvice(tone: .gray, text: "해상도 — · " + range)
+        }
+        let gsd = d / stillFx * 1000
+        let head = String(format: "%.2f mm/px · %.2f m", gsd, d)
+        if d < CaptureTuning.crackTooClose {
+            return DistanceAdvice(tone: .yellow, text: head + " · 너무 가까움 (" + range + ")")
+        }
+        if gsd <= CaptureTuning.crackGSDGood {
+            return DistanceAdvice(tone: .green, text: head)
+        }
+        if gsd <= CaptureTuning.crackGSDFair {
+            return DistanceAdvice(tone: .yellow, text: head + " · " + range)
+        }
+        return DistanceAdvice(tone: .red, text: head + " · 더 가까이 (" + range + ")")
     }
 }
