@@ -412,6 +412,9 @@ struct PreviewView: View {
     @ViewBuilder
     private var summaryRows: some View {
         if let meta = vm.meta {
+            if let site = meta.site {
+                LabeledContent("관리 대상", value: site.name + (site.id == nil ? " (업로드할 때 서버에 만듦)" : ""))
+            }
             if meta.isObjcap {
                 LabeledContent("방식", value: "고화질 사진 (Object Capture)")
                 if let info = meta.objcap {

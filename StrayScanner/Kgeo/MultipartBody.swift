@@ -18,6 +18,18 @@ struct MultipartBody {
         fields.append((name: name, value: value))
     }
 
+    /// 텍스트 필드만 있는 작은 본문 (장소 만들기 등)
+    func fieldsData() -> Data {
+        var body = Data()
+        for field in fields {
+            body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(field.name)\"\r\n\r\n".utf8))
+            body.append(Data(field.value.utf8))
+            body.append(Data("\r\n".utf8))
+        }
+        body.append(Data("--\(boundary)--\r\n".utf8))
+        return body
+    }
+
     /// 텍스트 필드 + 파일 하나를 outURL 에 쓴다.
     func write(fileField: String, fileURL: URL, fileName: String, mimeType: String, to outURL: URL) throws {
         try? FileManager.default.removeItem(at: outURL)

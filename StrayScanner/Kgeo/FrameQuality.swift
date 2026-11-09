@@ -101,6 +101,19 @@ enum CaptureTuning {
     /// 탭 결과 안내를 보여 주는 시간 (초)
     static let noticeSeconds: TimeInterval = 1.5
 
+    // MARK: 관리 대상(장소) — 서버 sites.py
+    /// 근처 장소를 찾는 반경 (m)
+    static let siteSearchRadius: Double = 300
+    /// 장소 요청 제한 시간 (초). 넘거나 실패하면 '직접 입력'
+    static let siteRequestTimeout: TimeInterval = 8
+    /// 녹화 화면의 지난 점검 사진: 작은 창 가로 (pt)·불투명도, 탭하면 큰 창
+    static let siteThumbWidth: CGFloat = 104
+    static let siteThumbLargeWidth: CGFloat = 220
+    static let siteThumbAlpha: CGFloat = 0.6
+    static let siteThumbLargeAlpha: CGFloat = 0.9
+    /// 녹화 시작 뒤 '지난번에 붙인 표식이 함께 찍히게' 안내를 보여 주는 시간 (초)
+    static let siteHintSeconds: TimeInterval = 10
+
     // MARK: 긴 녹화 안내
     /// 3분부터 2분마다 6초씩 '나눠 찍기 권장' (녹화는 계속)
     static let longCaptureStart: TimeInterval = 180

@@ -5,7 +5,7 @@
 //  Created by Kenneth Blomqvist on 11/15/20.
 //  Copyright © 2020 Stray Robots. All rights reserved.
 //
-//  kgeoScan 변경: 썸네일, 제목, 용량, 업로드 상태 배지.
+//  kgeoScan 변경: 썸네일, 제목, 관리 대상(장소) 이름, 용량, 업로드 상태 배지.
 //
 
 import SwiftUI
@@ -23,6 +23,12 @@ struct SessionRow: View {
                 Text(rowTitle())
                     .multilineTextAlignment(.leading)
                     .lineLimit(1)
+                if let site = meta?.site?.name, !site.isEmpty {
+                    Label(site, systemImage: "mappin.and.ellipse")
+                        .font(.caption)
+                        .foregroundColor(.accentColor)
+                        .lineLimit(1)
+                }
                 Text(subtitle(meta: meta))
                     .font(.caption)
                     .foregroundColor(.secondary)

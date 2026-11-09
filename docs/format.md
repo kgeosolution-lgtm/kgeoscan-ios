@@ -129,3 +129,5 @@ direction); `upload` is filled in after the dataset was sent to the server. See 
 | `fix.lat`, `fix.lon`, `fix.alt`, `fix.h_acc`, `fix.v_acc` | CLLocation at record start (WGS84, metres) |
 | `fix.true_heading`, `fix.magnetic_heading`, `fix.heading_accuracy` | CLHeading at record start, degrees clockwise from north |
 | `upload.job_id`, `upload.status`, `upload.step`, `upload.scene_item_id`, `upload.result_url` | server job bookkeeping |
+| `site.id`, `site.name` | managed place (server `sites.py`), also sent as the upload field `site_id`. `id` is missing when the place was only named offline; the app creates it right before upload and fills it in (if that fails the scan is uploaded without `site_id`) |
+| `site.note`, `site.last_job_id`, `site.last_thumb_url` | optional: note for a place created by the app, and the place's last inspection (job and thumbnail) at the time it was picked — the thumbnail is shown on the recording screen as a reference |

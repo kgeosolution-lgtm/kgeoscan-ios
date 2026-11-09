@@ -23,6 +23,8 @@
 //  - 면 촬영 균열 근접 모드: 예상 해상도(mm/px) 배지 녹색·황색·적색, 벽에서 30~50 cm, 정지 사진 간격 절반,
 //    흔들림이 작을 때만 정지 사진 (+ 찍힐 때 가벼운 진동). 녹화 중 화면 탭 = 균열 표시(핀), 길게 누르기 또는 '선' = 두 점 선분,
 //    '되돌리기' = 마지막 표시 지우기 → marks.json (CrackMarks.swift).
+//  - 관리 대상(장소)을 골랐으면 위 왼쪽에 그 장소의 지난 점검 사진(반투명, 탭하면 크게)과 '지난번에 붙인 표식이 함께 찍히게' 안내.
+//    정밀 정렬은 서버가 표식·특징점으로 하므로 앱은 참고 그림만 보여 준다.
 //  녹화 데이터(DatasetEncoder 이하)는 원본 그대로다.
 //
 
@@ -195,6 +197,13 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var noticeText: String?
     private var noticeUntil = Date.distantPast
 
+    // 관리 대상(장소): 지난 점검 사진 (같은 곳·같은 방향에서 찍게 돕는 참고 그림)
+    private let siteThumbView = UIImageView()
+    private let siteCaptionLabel = PaddedLabel()
+    private var siteThumbLarge = false
+    private var siteThumbWidth: NSLayoutConstraint?
+    private var siteThumbHeight: NSLayoutConstraint?
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -230,6 +239,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         if areaMode {
             setupMarkViews()
+        }
+        if scanMeta?.site != nil {
+            setupSiteViews()
         }
         setViewProperties()
         session.delegate = self
@@ -405,6 +417,105 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             self.haptic.notificationOccurred(.success)
             self.ringView.complete = true
         }
+    }
+
+    /// 관리 대상: 위 왼쪽에 장소 이름과 지난 점검 사진 (반투명, 탭하면 크게). 사진은 서버에서 받는다 (없거나 오프라인이면 이름만)
+    private func setupSiteViews() {
+        guard let site = scanMeta?.site else { return }
+        siteCaptionLabel.translatesAutoresizingMaskIntoConstraints = false
+        siteCaptionLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        siteCaptionLabel.textColor = .white
+        siteCaptionLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        siteCaptionLabel.layer.cornerRadius = 8
+        siteCaptionLabel.layer.masksToBounds = true
+        siteCaptionLabel.numberOfLines = 2
+        siteCaptionLabel.text = "장소: " + site.name
+        view.addSubview(siteCaptionLabel)
+
+        siteThumbView.translatesAutoresizingMaskIntoConstraints = false
+        siteThumbView.contentMode = .scaleAspectFill
+        siteThumbView.clipsToBounds = true
+        siteThumbView.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        siteThumbView.layer.cornerRadius = 8
+        siteThumbView.layer.borderWidth = 1
+        siteThumbView.layer.borderColor = UIColor.white.withAlphaComponent(0.7).cgColor
+        siteThumbView.alpha = CaptureTuning.siteThumbAlpha
+        siteThumbView.isHidden = true
+        siteThumbView.isUserInteractionEnabled = true
+        siteThumbView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(siteThumbTapped)))
+        view.addSubview(siteThumbView)
+
+        let safe = view.safeAreaLayoutGuide
+        let width = siteThumbView.widthAnchor.constraint(equalToConstant: CaptureTuning.siteThumbWidth)
+        let height = siteThumbView.heightAnchor.constraint(equalToConstant: CaptureTuning.siteThumbWidth)
+        siteThumbWidth = width
+        siteThumbHeight = height
+        NSLayoutConstraint.activate([
+            siteCaptionLabel.topAnchor.constraint(equalTo: geoLabel.bottomAnchor, constant: 6),
+            siteCaptionLabel.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            siteCaptionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+            siteThumbView.topAnchor.constraint(equalTo: siteCaptionLabel.bottomAnchor, constant: 4),
+            siteThumbView.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            width,
+            height,
+        ])
+        loadSiteThumb(site)
+    }
+
+    private func loadSiteThumb(_ site: SiteRef) {
+        let endpoints = ServerEndpoints(string: scanMeta?.serverBase ?? KgeoDefaults.storedServerBase)
+        guard let url = SiteClient.thumbURL(site.lastThumbUrl, endpoints: endpoints) else {
+            siteCaptionLabel.text = "장소: \(site.name)\n지난 점검 사진 없음"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = CaptureTuning.siteRequestTimeout
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            let image = data.flatMap { UIImage(data: $0) }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if let image = image {
+                    self.siteThumbView.image = image
+                    self.siteThumbView.isHidden = false
+                    self.applySiteThumbSize()
+                    self.siteCaptionLabel.text = "장소: \(site.name)\n지난 점검 사진 (탭하면 크게)"
+                } else {
+                    self.siteCaptionLabel.text = "장소: \(site.name)\n지난 점검 사진을 받지 못했습니다"
+                }
+            }
+        }.resume()
+    }
+
+    @objc private func siteThumbTapped() {
+        siteThumbLarge.toggle()
+        applySiteThumbSize()
+        UIView.animate(withDuration: 0.2) {
+            self.siteThumbView.alpha = self.siteThumbLarge ? CaptureTuning.siteThumbLargeAlpha : CaptureTuning.siteThumbAlpha
+            self.view.layoutIfNeeded()
+        }
+    }
+
+    /// 사진 비율대로 (세로 길이는 가로의 0.5~1.6배)
+    private func applySiteThumbSize() {
+        let width = siteThumbLarge ? CaptureTuning.siteThumbLargeWidth : CaptureTuning.siteThumbWidth
+        var aspect: CGFloat = 1
+        if let size = siteThumbView.image?.size, size.width > 0 {
+            aspect = min(max(size.height / size.width, 0.5), 1.6)
+        }
+        siteThumbWidth?.constant = width
+        siteThumbHeight?.constant = width * aspect
+    }
+
+    /// 관리 대상을 골랐을 때: 녹화 전과 시작 직후 '지난번에 붙인 표식이 함께 찍히게'
+    private func siteHint() -> String? {
+        guard scanMeta?.site != nil else { return nil }
+        if startedRecording == nil {
+            return "지난번에 붙인 표식이 함께 찍히게 해 주세요 — 위 왼쪽 지난 사진과 같은 곳·같은 방향에서"
+        }
+        guard let began = captureStartedAt, Date().timeIntervalSince(began) < CaptureTuning.siteHintSeconds else {
+            return nil
+        }
+        return "지난번에 붙인 표식이 함께 찍히게 해 주세요"
     }
 
     /// 면 촬영 균열 표시 버튼 [선] [되돌리기] (녹화 중에만 보인다)
@@ -1428,7 +1539,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         let isWarning = text != nil
         if text == nil {
-            if objectMode {
+            if let hint = siteHint() {
+                text = hint
+            } else if objectMode {
                 text = objectTracker.hint(recording: startedRecording != nil)
             } else if areaMode {
                 text = areaHint()

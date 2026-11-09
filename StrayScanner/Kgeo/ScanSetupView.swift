@@ -2,7 +2,8 @@
 //  ScanSetupView.swift
 //  kgeoScan
 //
-//  녹화 전 입력 화면: 제목, 비고, 모드, 위치(현재 위치 또는 지도에서 선택). (Stray Scanner 포크에 추가된 파일)
+//  녹화 전 입력 화면: 제목, 비고, 모드, 위치(현재 위치 또는 지도에서 선택), 관리 대상(장소, 서버 sites.py).
+//  (Stray Scanner 포크에 추가된 파일)
 //  서버 주소·업로드·노출 설정은 설정 화면(SettingsView)에 있다.
 //
 
@@ -24,6 +25,19 @@ struct ScanSetupView: View {
     @State private var pickedCoordinate: CLLocationCoordinate2D?
     @State private var manualHeadingText: String = ""
     @ObservedObject private var location = LocationService.shared
+    // 관리 대상(장소): none | nearby (근처 장소 고르기) | new (새 장소 만들기). 기본 없음
+    @State private var siteChoice = "none"
+    @State private var nearbySites: [SiteSummary] = []
+    @State private var loadingSites = false
+    @State private var siteError: String?
+    @State private var selectedSiteId: String?
+    /// 근처 장소를 못 불러왔을 때 직접 적는 이름 (업로드할 때 서버에 만든다)
+    @State private var manualSiteName = ""
+    @State private var newSiteName = ""
+    @State private var newSiteNote = ""
+    @State private var creatingSite = false
+    @State private var createdSite: SiteRef?
+    @State private var createMessage: String?
 
     /// 입력이 끝나면 호출된다. 호출한 쪽이 녹화 화면으로 넘긴다.
     let onStart: (ScanMeta) -> Void
@@ -107,6 +121,8 @@ struct ScanSetupView: View {
                 }
                 headingRow
             }
+
+            siteSection
 
             if let message = validationMessage {
                 Section {
@@ -238,6 +254,33 @@ struct ScanSetupView: View {
                             mode: ScanMode(rawValue: modeRaw) ?? .home,
                             serverBase: endpoints.normalized)
         meta.locationSource = locationSourceRaw
+        switch siteChoice {
+        case "nearby":
+            if let id = selectedSiteId, let site = nearbySites.first(where: { $0.siteId == id }) {
+                meta.site = site.ref
+            } else {
+                let name = manualSiteName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else {
+                    validationMessage = "관리 대상을 목록에서 고르거나 이름을 적어 주세요 (없으면 '없음')."
+                    return
+                }
+                meta.site = SiteRef(id: nil, name: String(name.prefix(100)))
+            }
+        case "new":
+            let name = newSiteName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                validationMessage = "새 장소 이름을 적어 주세요 (없으면 '없음')."
+                return
+            }
+            if let created = createdSite {
+                meta.site = created
+            } else {
+                let note = newSiteNote.trimmingCharacters(in: .whitespacesAndNewlines)
+                meta.site = SiteRef(id: nil, name: String(name.prefix(100)), note: note.isEmpty ? nil : String(note.prefix(300)))
+            }
+        default:
+            meta.site = nil
+        }
         let style = meta.mode == .survey ? surveyStyle : "plain"
         meta.objectMode = style == "object"
         if style == "area" {
@@ -265,6 +308,215 @@ struct ScanSetupView: View {
         }
         validationMessage = nil
         onStart(meta)
+    }
+
+    // MARK: - 관리 대상 (장소)
+
+    private var siteSection: some View {
+        Section("관리 대상 (선택)") {
+            Picker("관리 대상", selection: $siteChoice) {
+                Text("없음").tag("none")
+                Text("근처 장소").tag("nearby")
+                Text("새 장소").tag("new")
+            }
+            .pickerStyle(.segmented)
+            if siteChoice == "nearby" {
+                nearbySiteRows
+            } else if siteChoice == "new" {
+                newSiteRows
+            }
+            if siteChoice != "none" {
+                Text("같은 벽·구역을 날짜별로 다시 찍어 위험요소 변화를 비교합니다. 녹화 화면 위 왼쪽에 지난 점검 사진이 작게 뜨니 같은 곳·같은 방향에서 찍고, 지난번에 붙인 표식이 함께 찍히게 해 주세요.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .onChange(of: siteChoice) { choice in
+            if choice == "nearby" && nearbySites.isEmpty && !loadingSites {
+                loadNearbySites()
+            }
+        }
+        .onChange(of: newSiteName) { _ in
+            // 이름을 고치면 앞서 서버에 만든 장소와 다르다
+            createdSite = nil
+            createMessage = nil
+        }
+    }
+
+    @ViewBuilder
+    private var nearbySiteRows: some View {
+        if loadingSites {
+            HStack {
+                ProgressView()
+                Text("근처 장소를 찾는 중…").foregroundColor(.secondary)
+            }
+        } else if let error = siteError {
+            Text("근처 장소를 불러오지 못했습니다: \(error)")
+                .font(.caption)
+                .foregroundColor(.orange)
+            TextField("장소 이름 직접 입력", text: $manualSiteName)
+            Text("이름만 저장해 두고 업로드할 때 서버에 장소를 만듭니다.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        } else if nearbySites.isEmpty {
+            Text("반경 \(Int(CaptureTuning.siteSearchRadius)) m 안에 등록된 장소가 없습니다. '새 장소' 에서 만드세요.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        } else {
+            ForEach(nearbySites) { site in
+                Button {
+                    selectedSiteId = site.siteId
+                } label: {
+                    siteRow(site)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        Button {
+            loadNearbySites()
+        } label: {
+            Label("다시 찾기", systemImage: "arrow.clockwise")
+        }
+        .disabled(loadingSites)
+    }
+
+    private func siteRow(_ site: SiteSummary) -> some View {
+        HStack(spacing: 10) {
+            siteThumbnail(site)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(site.name)
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                Text(siteDetail(site))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if selectedSiteId == site.siteId {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.accentColor)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func siteThumbnail(_ site: SiteSummary) -> some View {
+        if let url = SiteClient.thumbURL(site.lastThumbUrl, endpoints: ServerEndpoints(string: serverBase)) {
+            AsyncImage(url: url) { image in
+                image.resizable().scaledToFill()
+            } placeholder: {
+                Color.gray.opacity(0.2)
+            }
+            .frame(width: 44, height: 44)
+            .clipped()
+            .cornerRadius(6)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.2))
+                Image(systemName: "mappin.and.ellipse").foregroundColor(.secondary)
+            }
+            .frame(width: 44, height: 44)
+        }
+    }
+
+    /// "12 m · 점검 3회 · 마지막 2026-11-09"
+    private func siteDetail(_ site: SiteSummary) -> String {
+        var parts: [String] = []
+        if let distance = site.distanceM {
+            parts.append(distance < 1000 ? String(format: "%.0f m", distance) : String(format: "%.1f km", distance / 1000))
+        }
+        parts.append("점검 \(site.scans ?? 0)회")
+        if let day = site.lastScanDay {
+            parts.append("마지막 " + day)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private var newSiteRows: some View {
+        TextField("장소 이름 (예: 본관 B1 북벽)", text: $newSiteName)
+        TextField("메모 (선택)", text: $newSiteNote)
+        Button {
+            createSiteTapped()
+        } label: {
+            if creatingSite {
+                HStack {
+                    ProgressView()
+                    Text("만드는 중…")
+                }
+            } else {
+                Label(createdSite == nil ? "지금 서버에 만들기" : "서버에 만들었습니다", systemImage: createdSite == nil ? "plus.circle" : "checkmark.circle")
+            }
+        }
+        .disabled(creatingSite || createdSite != nil
+                  || newSiteName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        if let message = createMessage {
+            Text(message)
+                .font(.caption)
+                .foregroundColor(createdSite == nil ? .orange : .secondary)
+        }
+        Text("만들지 않고 녹화해도 이름은 저장되고, 업로드할 때 서버에 만듭니다. 위치는 지금 GPS(또는 지도에서 고른 점)를 씁니다.")
+            .font(.caption)
+            .foregroundColor(.secondary)
+    }
+
+    /// 장소 찾기·만들기에 쓸 좌표: 지도에서 고른 점, 아니면 지금 GPS
+    private var siteCoordinate: CLLocationCoordinate2D? {
+        if locationSourceRaw == "map", let picked = pickedCoordinate {
+            return picked
+        }
+        return location.location?.coordinate
+    }
+
+    private func loadNearbySites() {
+        guard let endpoints = ServerEndpoints(string: serverBase) else {
+            siteError = "서버 주소가 올바르지 않습니다"
+            return
+        }
+        guard let coordinate = siteCoordinate else {
+            siteError = "위치를 아직 모릅니다 — GPS 가 잡힌 뒤 '다시 찾기' 를 누르세요"
+            return
+        }
+        loadingSites = true
+        siteError = nil
+        Task {
+            do {
+                let sites = try await SiteClient.nearby(endpoints: endpoints, lat: coordinate.latitude,
+                                                        lon: coordinate.longitude)
+                nearbySites = sites
+                if let selected = selectedSiteId, !sites.contains(where: { $0.siteId == selected }) {
+                    selectedSiteId = nil
+                }
+            } catch {
+                siteError = SiteClient.describe(error)
+            }
+            loadingSites = false
+        }
+    }
+
+    private func createSiteTapped() {
+        let name = newSiteName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let endpoints = ServerEndpoints(string: serverBase) else { return }
+        let note = newSiteNote.trimmingCharacters(in: .whitespacesAndNewlines)
+        let coordinate = siteCoordinate
+        creatingSite = true
+        createMessage = nil
+        Task {
+            do {
+                var site = try await SiteClient.create(endpoints: endpoints, name: String(name.prefix(100)),
+                                                       lat: coordinate?.latitude, lon: coordinate?.longitude,
+                                                       note: String(note.prefix(300)))
+                site.note = note.isEmpty ? nil : String(note.prefix(300))
+                createdSite = site
+                createMessage = "서버에 '\(site.name)' 장소를 만들었습니다 (\(site.id ?? "-"))"
+            } catch {
+                createdSite = nil
+                createMessage = "지금은 만들 수 없습니다 (\(SiteClient.describe(error))). 이름만 저장해 두고 업로드할 때 만듭니다."
+            }
+            creatingSite = false
+        }
     }
 
     private var areaDescription: String {

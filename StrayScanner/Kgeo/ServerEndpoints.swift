@@ -7,6 +7,7 @@
 //  base      = https://kgeodata.com/app/3dupload
 //  upload    = base/upload.py           POST multipart
 //  status    = base/status.py?job_id=   GET
+//  sites     = base/sites.py            GET ?lat=&lon=&radius_m= (근처 장소) · POST multipart (새 장소)
 //  viewer    = https://kgeodata.com/app/3dscan/?select=<scene_item_id>
 //
 
@@ -38,6 +39,21 @@ struct ServerEndpoints {
     func findJobURL(clientId: String) -> URL {
         var components = URLComponents(url: base.appendingPathComponent("find_job.py"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "client_id", value: clientId)]
+        return components.url!
+    }
+
+    /// 관리 대상(장소) API
+    var sitesURL: URL {
+        base.appendingPathComponent("sites.py")
+    }
+
+    func nearbySitesURL(lat: Double, lon: Double, radiusMeters: Double) -> URL {
+        var components = URLComponents(url: sitesURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "lat", value: String(format: "%.7f", lat)),
+            URLQueryItem(name: "lon", value: String(format: "%.7f", lon)),
+            URLQueryItem(name: "radius_m", value: String(format: "%.0f", radiusMeters)),
+        ]
         return components.url!
     }
 

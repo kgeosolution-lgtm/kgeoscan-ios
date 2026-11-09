@@ -205,6 +205,20 @@ final class UploadViewModel: ObservableObject {
         }
         appendLog("사전 검사 통과: 제목·위치·모드(\(meta.mode.rawValue))")
 
+        // 관리 대상: 이름만 적어 둔 장소(오프라인에서 고름)는 업로드 직전에 서버에 만든다. 실패해도 site_id 없이 올린다
+        if var site = meta.site, site.id == nil, !site.name.isEmpty {
+            do {
+                let created = try await SiteClient.create(endpoints: endpoints, name: site.name, lat: meta.fix?.lat,
+                                                          lon: meta.fix?.lon, note: site.note ?? "")
+                site.id = created.id
+                meta.site = site
+                try? meta.save(to: directory)
+                appendLog("관리 대상 '\(site.name)' 을 서버에 만들었습니다: \(created.id ?? "-")", persist: true)
+            } catch {
+                appendLog("관리 대상을 서버에 만들지 못했습니다 (\(SiteClient.describe(error))) — site_id 없이 올립니다", persist: true)
+            }
+        }
+
         var zipURL: URL?
         var bodyURL: URL?
         UIApplication.shared.isIdleTimerDisabled = true
@@ -247,6 +261,10 @@ final class UploadViewModel: ObservableObject {
             body.addField("scan_type", meta.isObjcap ? ScanMode.survey.rawValue : meta.mode.rawValue)
             body.addField("client_id", meta.clientId ?? "")
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
+            if let siteId = meta.site?.id, !siteId.isEmpty {
+                // 관리 대상(장소): 같은 장소의 이전 점검과 변화를 비교한다
+                body.addField("site_id", siteId)
+            }
             if meta.capture == "area" {
                 // 면 촬영(정사영상): Stray 형식 + hires/ 고해상도 사진·hires/poses.json
                 body.addField("area_mode", "1")

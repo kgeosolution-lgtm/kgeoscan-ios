@@ -109,6 +109,19 @@ struct AreaInfo: Codable, Hashable {
     var crackMarks: Int?
 }
 
+/// 관리 대상(장소). meta.json 의 site, 업로드 필드 site_id (서버 sites.py, hazards_contract.md 4절).
+/// 같은 벽·구역을 날짜별로 다시 찍어 위험요소 변화를 비교한다
+struct SiteRef: Codable, Hashable {
+    /// 서버 site_id (s_xxxxxxxx). 오프라인에서 이름만 적었으면 nil → 업로드 직전에 서버에 만든다
+    var id: String?
+    var name: String
+    /// 새 장소 메모 (업로드 직전에 만들 때 같이 보낸다)
+    var note: String?
+    /// 고를 때 그 장소의 마지막 점검 작업과 썸네일 (녹화 화면의 참고 그림)
+    var lastJobId: String?
+    var lastThumbUrl: String?
+}
+
 /// Object Capture 기록 (meta.json 의 objcap)
 struct ObjcapInfo: Codable, Hashable {
     /// PhotogrammetrySession 디테일. iOS 는 reduced 만 지원한다 (Apple 문서)
@@ -167,6 +180,8 @@ struct ScanMeta: Codable, Hashable {
     var capture: String?
     var objcap: ObjcapInfo?
     var area: AreaInfo?
+    /// 관리 대상(장소). 없으면 nil
+    var site: SiteRef?
 
     var isObjcap: Bool { capture == "objcap" }
 
@@ -180,6 +195,7 @@ struct ScanMeta: Codable, Hashable {
         if let area = area {
             copy.area = AreaInfo(surface: area.surface, hires: 0, crackMode: area.crackMode)
         }
+        copy.site = site
         return copy
     }
     var fix: GeoFix?

@@ -98,6 +98,11 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   LiDAR 깊이로 그 자리의 월드 좌표를 구해 핀을 띄우고 진동한다. 길게 누르거나 '선' 버튼 뒤 두 점을 찍으면 균열 선분, '되돌리기' 는 마지막 표시를 지운다.
   녹화를 마치면 `marks.json`(odometry.csv 와 같은 폴더, 같은 ARKit 월드 좌표, 형식 문서 참고)을 쓰고 표시가 없으면 만들지 않는다.
   미리보기 요약에 "균열 표시 N개", `meta.json` area 에 `crack_marks`. 기준값은 모두 `CaptureTuning` 에 있다.
+- **관리 대상(장소)** ([SiteClient.swift](StrayScanner/Kgeo/SiteClient.swift), 2026-11-09): 같은 벽·구역을 날짜별로 다시 찍어 위험요소 변화를
+  비교하도록 새 스캔 화면에서 '없음 / 근처 장소 / 새 장소' 를 고른다(기본 없음). 근처 장소는 지금 GPS(지도 선택이면 그 점)로 반경 300 m 를 묻고,
+  실패하면 이름 직접 입력. 새 장소는 바로 서버에 만들거나 이름만 저장해 업로드 직전에 만든다. 녹화 화면 위 왼쪽에 그 장소의 지난 점검 사진
+  (반투명, 탭하면 크게)과 "지난번에 붙인 표식이 함께 찍히게 해 주세요"(정밀 정렬은 서버가 표식·특징점으로). 목록 행·미리보기 요약에 장소 이름.
+  `meta.json` 의 `site: {id, name, note?, last_job_id?, last_thumb_url?}`, 업로드 필드 `site_id`. 기준값은 `CaptureTuning`.
 - **목록·설정**: 썸네일(녹화 중 가장 선명한 프레임 `thumb.jpg`), 용량, 배지(미업로드/업로드 중/처리 중/완료/실패), 스와이프 삭제.
   설정(톱니): 서버 주소, 기본 스캔 유형·위치 입력, 녹화 뒤 자동 업로드, Wi-Fi 에서만 업로드, 백그라운드 전송(실험), 노출.
 - **좌표 규약** (서버 `process_scan.py` 와 맞춤): 녹화 버튼을 누르면 ARKit 트래킹을 리셋해 **월드 원점 = 녹화 시작 지점**,
@@ -112,6 +117,7 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 |---|---|
 | `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `scan_type=home|survey`(모드), `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip), `client_id`(녹화마다 한 번 만든 UUID, 재시도해도 같음), `app`. 응답 `{"job_id": "...", "mode": "stray", "scan_type": "home"}` 또는 `{"error": "..."}`. 같은 제목·같은 zip 이름으로 24시간 안에 만든 작업이 있으면 서버가 새로 만들지 않고 그 `job_id` 를 `"duplicate": true` 와 함께 돌려준다 |
 | `GET {서버}/status.py?job_id=` | `{status, step 0..7, step_name, message, title, mode, scan_type, thumb_url, scene_item_id, glb_url}` — `done`/`failed` 가 될 때까지 3초마다 조회 |
+| 관리 대상(장소) | `GET {서버}/sites.py?lat=&lon=&radius_m=300` → `{"sites":[{site_id, name, distance_m, scans, last_scan_at, last_job_id, last_thumb_url, …}]}` (새 스캔 화면 '근처 장소'), `POST {서버}/sites.py` multipart `name`, `lat`, `lon`, `note` → `{"site_id","name"}` ('새 장소', 400/415 면 한 번 urlencoded 로). 고른 장소는 업로드 필드 `site_id`(선택)와 `meta.json` 의 `site` 로. sites.py 가 없거나(404) 오프라인이면 이름만 저장하고 업로드 직전에 만들며, 그것도 실패하면 `site_id` 없이 올린다 |
 | 물체 모드 필드 | 현장조사 + 물체 모드일 때 `object_mode=1`. 물체를 지정했으면 `obj_center="x,y,z"`(미터, ARKit 월드 좌표 = `odometry.csv` 좌표계, 소수 4자리), `obj_radius="0.15"`(미터, 기본 0.15), `obj_coverage="0..100"`(방위 커버리지 %). 지정하지 않았으면 `obj_center` 없이 `object_mode=1` 만 (서버가 카메라 시선 교점으로 자동 계산). 서버는 구 안에서 받침면 위로 솟은 덩어리를 물체로 보고 더 좁혀 자른다 |
 | 진행 페이지 | `{서버}` 의 `3dupload` 를 `3dscan` 으로 바꾼 주소 + `?job=<job_id>` — 사이트가 7단계 진행과 결과를 이어서 보여 준다 ("웹에서 진행 보기" 버튼) |
 | 결과 페이지 | 같은 주소 + `?select=<scene_item_id>` (없으면 `?job=`) |
