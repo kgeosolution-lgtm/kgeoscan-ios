@@ -341,7 +341,7 @@ struct ScanSetupView: View {
 
     private var modeDescription: String {
         if isTrench {
-            return "굴착 기록: 되메우기 전에 드러난 배관·케이블을 찍으면 서버가 관의 위치·직경·깊이(지표~관 윗면)·종류를 뽑아 3D·서류·지도로 남깁니다. 트렌치 가장자리를 따라 양쪽을 왕복하며(2~5분) 0.5~3 m 거리로 찍고, 시작과 끝에는 주변 지면·연석·맨홀이 3~5 m 들어가게 찍습니다(원지반·지도 맞춤용)."
+            return "굴착 기록: 되메우기 전에 드러난 배관·케이블을 찍으면 서버가 관의 위치·직경·깊이·종류를 뽑아 3D 로 남깁니다. 녹화를 누르고 주변 지면 → 트렌치 가장자리 따라 양쪽 왕복(2~5분) → 끝에 주변 지면. 관 종류는 녹화 뒤 미리보기에서 탭합니다."
         }
         return modeRaw == ScanMode.survey.rawValue
             ? "현장조사: 물체(360°), 면(정사영상 — 트렌치·벽 균열·바닥), 일반 영상 중에서 고릅니다. 반투명·광택 표면은 LiDAR 에 안 잡힙니다."
@@ -354,7 +354,7 @@ struct ScanSetupView: View {
               systemImage: "exclamationmark.triangle.fill")
             .font(.caption)
             .foregroundColor(.orange)
-        Text("• 가장자리 모서리에 기준 표식(AprilTag 스티커) 3~4개를 붙이세요 — 서버가 가설기준점·축척으로 씁니다\n• 물이 고였으면 빼고 찍으세요\n• 폰은 트렌치 안쪽으로 30~45° 기울여 반대쪽 벽과 바닥이 보이게\n• 녹화 중 관을 탭하면 종류(가스·상수·하수·전력·통신·난방)를 표시합니다\n• 약 1 m 마다 4K 무음 사진이 자동으로 찍힙니다\n• RTK 수신기(Emlid Reach RX2·Bad Elf Flex 등 MFi)를 연결하면 위치가 cm 급으로 기록되고 화면에 RTK 가 뜹니다")
+        Text("기준 표식(AprilTag 스티커)이 있으면 가장자리 모서리에 3~4개 붙이면 좋습니다 · 물이 고였으면 빼고 찍으세요")
             .font(.caption)
             .foregroundColor(.secondary)
     }

@@ -89,26 +89,25 @@ on-phone point preview. The server can use the file to weight or drop frames; wi
 ## kgeoScan addition: `gnss.csv` (excavation capture, optional)
 
 Written only in the excavation (⛏ 굴착 기록, `trench_mode=1`) capture: one row per saved frame, by the same encoder queue
-as `odometry.csv`, so `frame` and `timestamp` match `odometry.csv`. Each row holds the latest Core Location fix at that
-frame. When an MFi GNSS receiver (Emlid Reach RX2, Bad Elf Flex, …) is connected, iOS replaces the phone's location with
-the receiver's, so RTK positions land here with `source=accessory`. Header:
-`frame,timestamp,lat,lon,alt,ell_alt,h_acc,v_acc,loc_unix,age_s,source`. Unknown values are empty.
+as `odometry.csv`, so `frame` and `timestamp` match `odometry.csv`. Each row holds the phone's latest Core Location fix at
+that frame (RTK receivers are a later step). Header: `frame,timestamp,lat,lon,alt,ell_alt,h_acc,v_acc,loc_unix,age_s`.
+Unknown values are empty.
 
 | Field | Meaning |
 |---|---|
 | frame, timestamp | as in `odometry.csv` |
 | lat, lon | WGS84 degrees (9 decimals) |
 | alt, ell_alt | `CLLocation.altitude` (above mean sea level) and `ellipsoidalAltitude`, metres; empty when the vertical accuracy is unknown |
-| h_acc, v_acc | horizontal / vertical accuracy (m, 1σ as reported by iOS). The app shows an "RTK" badge when `h_acc` ≤ 0.05 |
+| h_acc, v_acc | horizontal / vertical accuracy (m) as reported by iOS |
 | loc_unix | when the fix was measured (Unix seconds) |
 | age_s | seconds between the fix and the frame (the same fix repeats until a new one arrives) |
-| source | `accessory` (external receiver, `CLLocation.sourceInformation.isProducedByAccessory`), `device` (phone), `simulated`, or `none` (no fix yet) |
 
 ## kgeoScan addition: `marks.json` (area and excavation capture, optional)
 
-Marks the user placed by tapping the screen while recording: cracks in area mode, utility types in excavation mode
-(`{"kind": "utility", "class": "gas|water|sewer|power|telecom|heat|unknown", "x", "y", "z", …}` — the server prefers these
-over its colour guess). It sits in the dataset folder next to
+Cracks the user tapped on the camera screen while recording in area mode, and utility types the user tapped on the
+coloured-point preview after an excavation recording (`{"kind": "utility", "class": "gas|water|sewer|power|telecom|heat|unknown",
+"x", "y", "z", "label": "", "source": "preview"}` — no `t`/`frame`; the point is the 1 cm preview voxel under the finger; the
+server prefers these over its colour guess). It sits in the dataset folder next to
 `odometry.csv` and is only written when there is at least one mark. Coordinates are the same ARKit world frame as
 `odometry.csv` (metres, y up, origin = where tracking was reset at record start), rounded to 0.1 mm.
 
@@ -128,10 +127,10 @@ over its colour guess). It sits in the dataset folder next to
 | id | 1, 2, … in the order the marks were made (an undone mark leaves a gap) |
 | kind | `crack` (one point: `x`, `y`, `z`), `utility` (one point, excavation) or `crack_line` (two points: `p0`, `p1`, each `[x, y, z]`) |
 | class | only for `kind` = `utility`: `gas`, `water`, `sewer`, `power`, `telecom`, `heat` or `unknown` (가스·상수·하수·전력·통신·난방·모름) |
-| t | ARFrame timestamp when the mark was made (for a line: when its end point was tapped), same time base as `odometry.csv` |
-| frame | Number of the last saved frame at that moment (`odometry.csv` `frame`) |
+| t | ARFrame timestamp when the mark was made (for a line: when its end point was tapped), same time base as `odometry.csv`. Missing for marks made in the preview |
+| frame | Number of the last saved frame at that moment (`odometry.csv` `frame`). Missing for marks made in the preview |
 | label | Free text, empty for now |
-| source | How the point was found: `raycast` (ARKit estimated or detected plane) or `depth` (LiDAR depth at that pixel). For a line, the less precise of its two points |
+| source | How the point was found: `raycast` (ARKit estimated or detected plane), `depth` (LiDAR depth at that pixel) or `preview` (tapped on the post-capture point preview). For a line, the less precise of its two points |
 
 Keys are written in alphabetical order; readers should not rely on key order.
 
@@ -152,4 +151,4 @@ direction); `upload` is filled in after the dataset was sent to the server. See 
 | `upload.job_id`, `upload.status`, `upload.step`, `upload.scene_item_id`, `upload.result_url` | server job bookkeeping |
 | `site.id`, `site.name` | managed place (server `sites.py`), also sent as the upload field `site_id`. `id` is missing when the place was only named offline; the app creates it right before upload and fills it in (if that fails the scan is uploaded without `site_id`) |
 | `site.note`, `site.last_job_id`, `site.last_thumb_url` | optional: note for a place created by the app, and the place's last inspection (job and thumbnail) at the time it was picked — the thumbnail is shown on the recording screen as a reference |
-| `trench.mode` and the rest of `trench` | excavation capture (`capture: "trench"`, upload field `trench_mode=1`, `scan_type=survey`): `mode` 1, still photos `hires`, `hires_skipped`, `hires_source`, `hires_format`, `video_size` (same `hires/` + `hires/poses.json` as area mode, about every 1 m or 15°), `passes` (edge passes the app counted, both sides = 2), checklist `markers_placed`, `start_context`, `end_context`, `utility_marks`, and `gnss_rows`, `rtk_ratio` (share of rows with h_acc ≤ 5 cm), `gnss_accessory` |
+| `trench.mode` and the rest of `trench` | excavation capture (`capture: "trench"`, upload field `trench_mode=1`, `scan_type=survey`): `mode` 1, still photos `hires`, `hires_skipped`, `hires_source`, `hires_format`, `video_size` (same `hires/` + `hires/poses.json` as area mode, about every 1 m or 15°), `passes` (edge passes the app counted, both sides = 2), `start_context`, `end_context` (surroundings filmed at start/end, app estimate), `gnss_rows` and `utility_marks` (utility marks added in the preview). Exposure is forced to the fast shutter (`exposure_mode: "fast"`) |

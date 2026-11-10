@@ -134,16 +134,13 @@ struct TrenchInfo: Codable, Hashable {
     var videoSize: String?
     /// 앱이 센 트렌치 가장자리 구간 수 (양쪽 왕복 = 2)
     var passes: Int?
-    /// 진행 체크리스트: 기준 표식(AprilTag) 붙임, 시작·끝 주변 지면 (3~5 m) 촬영
-    var markersPlaced: Bool?
+    /// 시작·끝에 주변 지면(3~5 m)을 찍었는지 (앱 추정)
     var startContext: Bool?
     var endContext: Bool?
-    /// 관 종류 표시 수 (marks.json kind=utility)
-    var utilityMarks: Int?
-    /// gnss.csv 행 수, 수평 정확도 5 cm 이하(RTK) 비율, 외부 수신기 값이 있었는지
+    /// gnss.csv 행 수 (폰 위치)
     var gnssRows: Int?
-    var rtkRatio: Float?
-    var gnssAccessory: Bool?
+    /// 미리보기에서 탭한 관 종류 표시 수 (marks.json kind=utility)
+    var utilityMarks: Int?
 }
 
 /// Object Capture 기록 (meta.json 의 objcap)

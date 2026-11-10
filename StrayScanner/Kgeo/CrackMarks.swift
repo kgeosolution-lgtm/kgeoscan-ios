@@ -2,8 +2,8 @@
 //  CrackMarks.swift
 //  kgeoScan
 //
-//  위치 표시 (녹화 중 화면 탭): 면 촬영은 균열(점·두 점 선분), 굴착 기록은 관 종류(utility, class = gas|water|sewer|power|
-//  telecom|heat|unknown — 서버는 이 표시를 색 추정보다 우선한다). 탭한 곳의 월드 좌표(ARKit raycast → LiDAR 깊이)를 모아
+//  위치 표시: 면 촬영은 녹화 중 화면 탭으로 균열(점·두 점 선분), 굴착 기록은 녹화 뒤 색 점 미리보기를 탭해 관 종류
+//  (utility, class = gas|water|sewer|power|telecom|heat|unknown — 서버는 이 표시를 색 추정보다 우선한다). 월드 좌표를 모아
 //  녹화 폴더(odometry.csv 와 같은 폴더) 에 marks.json 으로 쓴다. 좌표는 odometry.csv 와 같은 ARKit 월드(m).
 //  표시가 없으면 파일을 만들지 않는다. 화면의 핀·선은 같은 월드 좌표에 놓은 SceneKit 노드다.
 //  (Stray Scanner 포크에 추가된 파일)
@@ -11,7 +11,7 @@
 //  {"version":1,"coord":"arkit_world","marks":[
 //    {"id":1,"kind":"crack","x":..,"y":..,"z":..,"t":66351.18,"frame":123,"label":"","source":"raycast"},
 //    {"id":2,"kind":"crack_line","p0":[x,y,z],"p1":[x,y,z],"t":..,"frame":..,"label":"","source":"depth"},
-//    {"id":3,"kind":"utility","class":"gas","x":..,"y":..,"z":..,"t":..,"frame":..,"label":"","source":"raycast"}]}
+//    {"id":3,"kind":"utility","class":"gas","x":..,"y":..,"z":..,"label":"","source":"preview"}]}   (미리보기 표시는 t·frame 없음)
 //
 
 import SceneKit
@@ -78,12 +78,13 @@ struct CrackMark: Codable {
     var z: Double? = nil
     var p0: [Double]? = nil
     var p1: [Double]? = nil
-    /// 표시한(선은 끝점을 찍은) 순간의 ARFrame 시간 (odometry.csv timestamp 와 같은 시간축)
-    var t: Double
-    /// 그때 마지막으로 저장된 프레임 번호 (odometry.csv frame)
-    var frame: Int
+    /// 표시한(선은 끝점을 찍은) 순간의 ARFrame 시간 (odometry.csv timestamp 와 같은 시간축). 미리보기 표시는 nil
+    var t: Double? = nil
+    /// 그때 마지막으로 저장된 프레임 번호 (odometry.csv frame). 미리보기 표시는 nil
+    var frame: Int? = nil
     var label: String = ""
-    /// 좌표를 구한 방법: raycast (ARKit 추정·감지 면) | depth (LiDAR 깊이 역투영). 선은 두 점 중 덜 정확한 쪽
+    /// 좌표를 구한 방법: raycast (ARKit 추정·감지 면) | depth (LiDAR 깊이 역투영) | preview (녹화 뒤 색 점을 탭, 1 cm 복셀 점).
+    /// 선은 두 점 중 덜 정확한 쪽
     var source: String
     /// kind=utility 의 관 종류 (JSON 키 "class")
     var utilityClass: String? = nil
@@ -122,7 +123,7 @@ enum CrackMarks {
                   t: t, frame: frame, source: source)
     }
 
-    static func utility(id: Int, at position: SIMD3<Float>, utilityClass: UtilityClass, t: TimeInterval, frame: Int,
+    static func utility(id: Int, at position: SIMD3<Float>, utilityClass: UtilityClass, t: TimeInterval?, frame: Int?,
                         source: String) -> CrackMark {
         CrackMark(id: id, kind: "utility", x: rounded(position.x), y: rounded(position.y), z: rounded(position.z),
                   t: t, frame: frame, source: source, utilityClass: utilityClass.rawValue)
@@ -136,13 +137,27 @@ enum CrackMarks {
                   t: t, frame: frame, source: source)
     }
 
-    /// 녹화 폴더에 marks.json. 표시가 없으면 쓰지 않는다
+    static func url(in directory: URL) -> URL {
+        directory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    /// 녹화 폴더의 marks.json (없거나 못 읽으면 빈 목록)
+    static func read(from directory: URL) -> [CrackMark] {
+        guard let data = try? Data(contentsOf: url(in: directory)),
+              let file = try? JSONDecoder().decode(CrackMarksFile.self, from: data) else { return [] }
+        return file.marks
+    }
+
+    /// 녹화 폴더에 marks.json. 표시가 없으면 파일을 지운다
     static func write(_ marks: [CrackMark], to directory: URL) throws {
-        guard !marks.isEmpty else { return }
+        guard !marks.isEmpty else {
+            try? FileManager.default.removeItem(at: url(in: directory))
+            return
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(CrackMarksFile(marks: marks))
-        try data.write(to: directory.appendingPathComponent(fileName, isDirectory: false), options: .atomic)
+        try data.write(to: url(in: directory), options: .atomic)
     }
 
     // MARK: - 화면 표시 (녹화 화면 ARSCNView 의 루트 노드에 월드 좌표로)

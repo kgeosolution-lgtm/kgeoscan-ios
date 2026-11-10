@@ -110,11 +110,9 @@ enum CaptureTuning {
     static let trenchGuideMaxDistance: Float = 4.0
     static let trenchGuideMaxSpeed: Float = 0.5
     static let trenchGuideMaxRotation: Float = 45
-    /// 폰을 트렌치 안쪽으로 기울이는 각 (카메라가 수평 아래로 내려다보는 각, °): 권장 30~45, 15 미만·70 초과면 안내
+    /// 폰을 트렌치 안쪽으로 기울이는 각 (카메라가 수평 아래로 내려다보는 각, °) — 한 줄 안내 문구
     static let trenchTiltNear: Float = 30
     static let trenchTiltFar: Float = 45
-    static let trenchTiltLow: Float = 15
-    static let trenchTiltHigh: Float = 70
     /// 근경·원경 정지 사진 간격: 약 1 m 이동 또는 15° 회전
     static let trenchHiresMove: Float = 1.0
     static let trenchHiresTurn: Float = 15
@@ -127,9 +125,10 @@ enum CaptureTuning {
     static let trenchStartWindow: TimeInterval = 40
     static let trenchEndAfter: TimeInterval = 20
 
-    // MARK: GNSS (굴착 기록 gnss.csv, RTK 배지)
-    /// 수평 정확도가 이 값(m) 이하이면 화면에 RTK 배지
-    static let rtkHorizontalAccuracy: Double = 0.05
+    // MARK: 녹화 뒤 미리보기에서 관 종류 표시 (굴착 기록)
+    /// 색 점 화면에서 탭한 곳을 찾는 반경 (pt), 표시 핀 반지름 (px, 레티나 배율 반영)
+    static let previewPickTolerance: CGFloat = 24
+    static let previewMarkRadiusPx: Float = 9
 
     // MARK: 관리 대상(장소) — 서버 sites.py
     /// 근처 장소를 찾는 반경 (m)

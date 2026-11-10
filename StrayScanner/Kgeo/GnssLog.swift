@@ -2,11 +2,9 @@
 //  GnssLog.swift
 //  kgeoScan
 //
-//  굴착 기록 모드: 녹화 중 저장되는 프레임마다 그 순간의 Core Location 위치를 gnss.csv 로 남긴다
-//  (DatasetEncoder 의 인코더 큐에서 odometry.csv 와 같은 프레임 번호로 쓴다).
-//  MFi GNSS 수신기(Emlid Reach RX2, Bad Elf Flex 등)를 연결하면 iOS 가 위치를 그 수신기 값으로 바꾸므로 같은 코드로
-//  RTK 위치가 남는다 (CLLocation.sourceInformation.isProducedByAccessory → source=accessory). 장비가 없으면 폰 GPS 값.
-//  frame,timestamp,lat,lon,alt,ell_alt,h_acc,v_acc,loc_unix,age_s,source  (모르는 값은 빈 칸)
+//  굴착 기록 모드: 녹화 중 저장되는 프레임마다 그 순간의 폰 위치(Core Location)를 gnss.csv 로 남긴다
+//  (DatasetEncoder 의 인코더 큐에서 odometry.csv 와 같은 프레임 번호로 쓴다). RTK 연동은 나중 단계.
+//  frame,timestamp,lat,lon,alt,ell_alt,h_acc,v_acc,loc_unix,age_s  (모르는 값은 빈 칸)
 //  (Stray Scanner 포크에 추가된 파일)
 //
 
@@ -25,14 +23,9 @@ struct GnssSample {
     /// 위치가 측정된 시각 (Unix 초)과 그 뒤 지난 시간 (초)
     var locUnix: Double?
     var age: Double?
-    /// accessory (외부 수신기) | device (폰) | simulated | none (위치 없음)
-    var source: String
 
     init(location: CLLocation?, now: Date = Date()) {
-        guard let loc = location, loc.horizontalAccuracy >= 0 else {
-            source = "none"
-            return
-        }
+        guard let loc = location, loc.horizontalAccuracy >= 0 else { return }
         lat = loc.coordinate.latitude
         lon = loc.coordinate.longitude
         hAcc = loc.horizontalAccuracy
@@ -43,24 +36,13 @@ struct GnssSample {
         }
         locUnix = loc.timestamp.timeIntervalSince1970
         age = now.timeIntervalSince(loc.timestamp)
-        if let info = loc.sourceInformation {
-            source = info.isProducedByAccessory ? "accessory" : (info.isSimulatedBySoftware ? "simulated" : "device")
-        } else {
-            source = "device"
-        }
-    }
-
-    /// 수평 정확도 5 cm 이하 (CaptureTuning.rtkHorizontalAccuracy)
-    var isRTK: Bool {
-        guard let accuracy = hAcc else { return false }
-        return accuracy <= CaptureTuning.rtkHorizontalAccuracy
     }
 }
 
 /// 녹화 폴더의 gnss.csv. DatasetEncoder 의 인코더 큐에서 부른다
 final class GnssWriter {
     static let fileName = "gnss.csv"
-    static let header = "frame,timestamp,lat,lon,alt,ell_alt,h_acc,v_acc,loc_unix,age_s,source\n"
+    static let header = "frame,timestamp,lat,lon,alt,ell_alt,h_acc,v_acc,loc_unix,age_s\n"
 
     private var handle: FileHandle?
 
@@ -88,7 +70,7 @@ final class GnssWriter {
             cell(sample.ellipsoidalAlt, "%.3f"), cell(sample.hAcc, "%.3f"), cell(sample.vAcc, "%.3f"),
             cell(sample.locUnix, "%.3f"), cell(sample.age, "%.3f"),
         ]
-        let line = "\(frame),\(timestamp)," + cells.joined(separator: ",") + "," + sample.source + "\n"
+        let line = "\(frame),\(timestamp)," + cells.joined(separator: ",") + "\n"
         handle.write(Data(line.utf8))
     }
 

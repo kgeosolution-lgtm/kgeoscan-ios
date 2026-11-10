@@ -3,6 +3,7 @@
 //  kgeoScan
 //
 //  촬영 뒤 미리보기: 3D 를 손가락으로 돌려 보고 [업로드] [다시 찍기] [나중에 올리기] 를 고른다.
+//  굴착 기록은 색 점을 한 번 탭해 관 종류(가스·상수·하수·전력·통신·난방·모름)를 표시한다 → marks.json kind=utility.
 //  목록의 녹화 상세에서도 같은 화면(버튼 없이)을 연다. (Stray Scanner 포크에 추가된 파일)
 //
 
@@ -95,6 +96,8 @@ final class PreviewViewModel: ObservableObject {
     @Published var uploadBytes: Int64 = 0
     /// nil = 아직 모름
     @Published var onWifi: Bool?
+    /// 굴착 기록: 미리보기에서 탭한 관 종류 표시 (marks.json kind=utility)
+    @Published var utilityMarks: [PreviewMark] = []
 
     let directory: URL
     private let monitor = NWPathMonitor()
@@ -102,6 +105,7 @@ final class PreviewViewModel: ObservableObject {
     private var waitingForMesh = false
 
     var isObjcap: Bool { meta?.isObjcap == true }
+    var isTrench: Bool { meta?.capture == "trench" }
 
     init(directory: URL) {
         self.directory = directory
@@ -123,6 +127,7 @@ final class PreviewViewModel: ObservableObject {
     /// 메인 스레드에서 부른다: 메타·업로드 크기, 그리고 기본 미리보기(영상은 색 점, Object Capture 는 모델)
     func load() {
         meta = ScanMeta.load(from: directory)
+        loadUtilityMarks()
         let dir = directory
         DispatchQueue.global(qos: .utility).async {
             let bytes = ZipPackager.uploadSize(of: dir)
@@ -193,6 +198,43 @@ final class PreviewViewModel: ObservableObject {
         }
     }
 
+    /// 메인 스레드: marks.json 의 관 종류 표시
+    func loadUtilityMarks() {
+        utilityMarks = CrackMarks.read(from: directory).compactMap { mark in
+            guard mark.kind == "utility", let x = mark.x, let y = mark.y, let z = mark.z else { return nil }
+            return PreviewMark(id: mark.id, position: SIMD3<Float>(Float(x), Float(y), Float(z)),
+                               utilityClass: UtilityClass(rawValue: mark.utilityClass ?? "") ?? .unknown)
+        }
+    }
+
+    /// 미리보기에서 고른 색 점에 관 종류 표시를 더한다 (marks.json 과 meta.json trench.utility_marks)
+    func addUtilityMark(at position: SIMD3<Float>, utilityClass: UtilityClass) {
+        var marks = CrackMarks.read(from: directory)
+        let id = (marks.map { $0.id }.max() ?? 0) + 1
+        marks.append(CrackMarks.utility(id: id, at: position, utilityClass: utilityClass, t: nil, frame: nil,
+                                        source: "preview"))
+        saveMarks(marks)
+    }
+
+    /// 마지막 관 종류 표시를 지운다
+    func removeLastUtilityMark() {
+        var marks = CrackMarks.read(from: directory)
+        guard let index = marks.lastIndex(where: { $0.kind == "utility" }) else { return }
+        marks.remove(at: index)
+        saveMarks(marks)
+    }
+
+    private func saveMarks(_ marks: [CrackMark]) {
+        do {
+            try CrackMarks.write(marks, to: directory)
+        } catch {
+            print("marks.json 저장 실패: \(error.localizedDescription)")
+        }
+        meta?.trench?.utilityMarks = marks.filter { $0.kind == "utility" }.count
+        try? meta?.save(to: directory)
+        loadUtilityMarks()
+    }
+
     /// 미리보기 저장이 끝났을 때 (메인 스레드)
     func buildFinished() {
         if waitingForPoints && !PreviewBuilder.shared.isBuildingPoints(directory) {
@@ -220,6 +262,9 @@ struct PreviewView: View {
     @State private var showMesh = false
     /// 색 점 EDL 음영 (기본 켬)
     @AppStorage(KgeoDefaults.previewEDLKey) private var edlEnabled: Bool = true
+    /// 굴착 기록: 탭한 색 점과 관 종류 고르기
+    @State private var pickedPoint: SIMD3<Float>?
+    @State private var choosingUtility = false
     let context: Context
     let onUpload: (() -> Void)?
     let onRetake: ((ScanMeta) -> Void)?
@@ -258,6 +303,22 @@ struct PreviewView: View {
                 viewer
                     .frame(height: 360)
                     .listRowInsets(EdgeInsets())
+                if vm.isTrench && !showMesh && vm.points != nil {
+                    HStack {
+                        Text(vm.utilityMarks.isEmpty ? "관을 한 번 탭하면 종류를 표시합니다 (선택)"
+                             : "관 종류 표시 \(vm.utilityMarks.count)개 — 더 탭해서 표시")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if !vm.utilityMarks.isEmpty {
+                            Button("마지막 지우기") {
+                                vm.removeLastUtilityMark()
+                            }
+                            .font(.caption)
+                            .buttonStyle(.borderless)
+                        }
+                    }
+                }
                 if let text = caption {
                     Text(text)
                         .font(.caption)
@@ -324,6 +385,16 @@ struct PreviewView: View {
                 vm.loadPoints()
             }
         }
+        .confirmationDialog("이 자리의 관 종류", isPresented: $choosingUtility, titleVisibility: .visible) {
+            ForEach(UtilityClass.allCases, id: \.self) { item in
+                Button(item.label) {
+                    if let point = pickedPoint {
+                        vm.addUtilityMark(at: point, utilityClass: item)
+                    }
+                }
+            }
+            Button("취소", role: .cancel) {}
+        }
         .confirmationDialog("이 녹화를 지우고 같은 설정으로 다시 찍을까요?", isPresented: $confirmRetake,
                             titleVisibility: .visible) {
             Button("지우고 다시 찍기", role: .destructive) {
@@ -356,7 +427,7 @@ struct PreviewView: View {
             }
             .padding(24)
         } else if let cloud = vm.points {
-            PointCloudView(cloud: cloud, edl: edlEnabled)
+            PointCloudView(cloud: cloud, edl: edlEnabled, marks: vm.utilityMarks, onPick: pickHandler)
         } else if vm.loadingPoints {
             ProgressView("미리보기 여는 중…")
         } else if let failure = builder.pointsFailures[key] {
@@ -367,6 +438,15 @@ struct PreviewView: View {
             Text(vm.pointsReason ?? "미리보기 없음")
                 .foregroundColor(.secondary)
                 .padding()
+        }
+    }
+
+    /// 굴착 기록이면 색 점 한 번 탭 → 관 종류 고르기
+    private var pickHandler: ((SIMD3<Float>) -> Void)? {
+        guard vm.isTrench else { return nil }
+        return { point in
+            pickedPoint = point
+            choosingUtility = true
         }
     }
 
@@ -437,13 +517,13 @@ struct PreviewView: View {
                     LabeledContent("고해상도 사진", value: "\(trench.hires ?? 0)장"
                                    + ((trench.hiresSkipped ?? 0) > 0 ? " · 흔들려서 건너뜀 \(trench.hiresSkipped ?? 0)회" : ""))
                     LabeledContent("가장자리 왕복", value: "\(trench.passes ?? 0)구간 (양쪽 = 2)")
-                    LabeledContent("체크", value: PreviewView.trenchChecklistText(trench))
+                    LabeledContent("주변 지면", value: (trench.startContext == true ? "시작 ✓" : "시작 ✗")
+                                   + " · " + (trench.endContext == true ? "끝 ✓" : "끝 ✗"))
                     if let marks = trench.utilityMarks, marks > 0 {
                         LabeledContent("관 종류 표시", value: "\(marks)개")
                     }
                     if let rows = trench.gnssRows, rows > 0 {
-                        LabeledContent("GNSS", value: String(format: "RTK(±5 cm 이하) %.0f%%", (trench.rtkRatio ?? 0) * 100)
-                                       + (trench.gnssAccessory == true ? " · 외부 수신기" : " · 폰 GPS"))
+                        LabeledContent("위치 기록", value: "gnss.csv \(rows)행 (폰 GPS)")
                     }
                 }
                 if let area = meta.area {
@@ -523,17 +603,6 @@ struct PreviewView: View {
         case "wall": return "벽"
         default: return "자동"
         }
-    }
-
-    /// 굴착 기록 체크리스트 한 줄
-    static func trenchChecklistText(_ trench: TrenchInfo) -> String {
-        let items: [(String, Bool)] = [
-            ("표식", trench.markersPlaced == true),
-            ("시작 주변", trench.startContext == true),
-            ("왕복", (trench.passes ?? 0) >= 2),
-            ("끝 주변", trench.endContext == true),
-        ]
-        return items.map { ($0.1 ? "✓ " : "✗ ") + $0.0 }.joined(separator: " · ")
     }
 
     /// meta.json 을 다시 읽으면 snake_case 사전 키가 camelCase 로 바뀌어 온다 (JSONDecoder.convertFromSnakeCase)

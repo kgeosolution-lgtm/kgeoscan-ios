@@ -10,6 +10,8 @@
 //  - EDL(eye-dome lighting): 1차 패스에서 색과 시선 깊이를 따로 그리고, 2차 패스에서 이웃 8개의 log2 깊이와 비교해
 //    음영을 넣는다 (조명 없는 점에 입체감, Potree·CloudCompare 와 같은 방식). 끄면 색만 그대로 보여 준다.
 //  - 한 손가락: 돌리기(턴테이블), 두 손가락: 확대·이동, 두 번 탭: 처음 시점.
+//  - 굴착 기록 미리보기: 한 번 탭하면 그 자리에서 가장 앞에 보이는 색 점(월드 좌표)을 돌려준다 (onPick, 관 종류 표시).
+//    표시는 화면에서 늘 같은 크기의 둥근 점으로 맨 위에 그린다 (setMarks).
 //  셰이더는 실행 중에 소스로 컴파일한다 (빌드에 Metal 도구가 없어도 되게). CI 가 같은 소스를 xcrun metal 로 미리 검사한다.
 //  Metal 을 못 쓰면 PointCloudView 가 SceneKit 점으로 대신 보여 준다.
 //  (Stray Scanner 포크에 추가된 파일)
@@ -172,6 +174,13 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
     private let edlPipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
     private let vertexBuffer: MTLBuffer
+    /// 탭한 곳 찾기용 (배열은 복사하지 않고 같은 저장소를 본다)
+    private let positions: [SIMD3<Float>]
+    private let markDepthState: MTLDepthStencilState
+    private var markBuffer: MTLBuffer?
+    private var markCount = 0
+    /// 있으면 한 번 탭으로 그 자리의 색 점을 고른다
+    var onPick: ((SIMD3<Float>) -> Void)?
     private let pointCount: Int
     private let pointSize: Float
     private var colorTarget: MTLTexture?
@@ -241,7 +250,12 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
         depthDescriptor.depthCompareFunction = .less
         depthDescriptor.isDepthWriteEnabled = true
         let vertexStride = 16
+        // 표시(관 종류 핀)는 가리지 않게 늘 위에
+        let markDepthDescriptor = MTLDepthStencilDescriptor()
+        markDepthDescriptor.depthCompareFunction = .always
+        markDepthDescriptor.isDepthWriteEnabled = false
         guard let depthState = device.makeDepthStencilState(descriptor: depthDescriptor),
+              let markDepthState = device.makeDepthStencilState(descriptor: markDepthDescriptor),
               let buffer = device.makeBuffer(length: count * vertexStride, options: .storageModeShared) else {
             PointCloudRenderer.lastError = "점 버퍼를 만들 수 없습니다"
             return nil
@@ -286,6 +300,8 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
         self.edlPipeline = edlPipeline
         self.depthState = depthState
         self.vertexBuffer = buffer
+        self.positions = cloud.points.positions
+        self.markDepthState = markDepthState
         self.pointCount = count
         self.pointSize = max(cloud.voxel, 0.001) * PointCloudRenderer.pointScale
         self.sceneRadius = radius
@@ -321,7 +337,9 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         let reset = UITapGestureRecognizer(target: self, action: #selector(handleReset(_:)))
         reset.numberOfTapsRequired = 2
-        let recognizers: [UIGestureRecognizer] = [orbit, pan, pinch, reset]
+        let pick = UITapGestureRecognizer(target: self, action: #selector(handlePick(_:)))
+        pick.require(toFail: reset)
+        let recognizers: [UIGestureRecognizer] = [orbit, pan, pinch, reset, pick]
         for recognizer in recognizers {
             recognizer.delegate = self
             view.addGestureRecognizer(recognizer)
@@ -381,7 +399,82 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
         gesture.view?.setNeedsDisplay()
     }
 
+    @objc private func handlePick(_ gesture: UITapGestureRecognizer) {
+        guard let onPick = onPick, let view = gesture.view else { return }
+        if let point = pick(at: gesture.location(in: view), viewSize: view.bounds.size) {
+            onPick(point)
+        }
+    }
+
+    /// 화면 점(pt)에서 반경 CaptureTuning.previewPickTolerance 안의 색 점 중 카메라에 가장 가깝고 손가락에 가까운 것
+    private func pick(at location: CGPoint, viewSize: CGSize) -> SIMD3<Float>? {
+        guard viewSize.width > 0, viewSize.height > 0 else { return nil }
+        let viewProjection = matrices(aspect: Float(viewSize.width / viewSize.height)).viewProjection
+        let tapX = Float(location.x / viewSize.width) * 2 - 1
+        let tapY = 1 - Float(location.y / viewSize.height) * 2
+        let radiusX = Float(CaptureTuning.previewPickTolerance / viewSize.width) * 2
+        let radiusY = Float(CaptureTuning.previewPickTolerance / viewSize.height) * 2
+        var best: SIMD3<Float>?
+        var bestScore = Float.greatestFiniteMagnitude
+        positions.withUnsafeBufferPointer { buffer in
+            for point in buffer {
+                let clip = viewProjection * SIMD4<Float>(point.x, point.y, point.z, 1)
+                guard clip.w > 0.001 else { continue }
+                let dx = (clip.x / clip.w - tapX) / radiusX
+                let dy = (clip.y / clip.w - tapY) / radiusY
+                let d2 = dx * dx + dy * dy
+                guard d2 <= 1 else { continue }
+                // 깊이(w)가 작을수록, 손가락에 가까울수록
+                let score = clip.w * (1 + 0.5 * d2)
+                if score < bestScore {
+                    bestScore = score
+                    best = point
+                }
+            }
+        }
+        return best
+    }
+
+    /// 표시 (월드 좌표, 색): 화면에서 늘 같은 크기의 둥근 점으로 맨 위에
+    func setMarks(_ marks: [(position: SIMD3<Float>, color: UIColor)]) {
+        guard !marks.isEmpty, let buffer = device.makeBuffer(length: marks.count * 16, options: .storageModeShared) else {
+            markBuffer = nil
+            markCount = 0
+            view?.setNeedsDisplay()
+            return
+        }
+        let raw = buffer.contents()
+        for (index, mark) in marks.enumerated() {
+            var red: CGFloat = 0
+            var green: CGFloat = 0
+            var blue: CGFloat = 0
+            var alpha: CGFloat = 0
+            mark.color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            let o = index * 16
+            raw.storeBytes(of: mark.position.x, toByteOffset: o, as: Float.self)
+            raw.storeBytes(of: mark.position.y, toByteOffset: o + 4, as: Float.self)
+            raw.storeBytes(of: mark.position.z, toByteOffset: o + 8, as: Float.self)
+            raw.storeBytes(of: UInt8(max(0, min(255, red * 255))), toByteOffset: o + 12, as: UInt8.self)
+            raw.storeBytes(of: UInt8(max(0, min(255, green * 255))), toByteOffset: o + 13, as: UInt8.self)
+            raw.storeBytes(of: UInt8(max(0, min(255, blue * 255))), toByteOffset: o + 14, as: UInt8.self)
+            raw.storeBytes(of: UInt8(255), toByteOffset: o + 15, as: UInt8.self)
+        }
+        markBuffer = buffer
+        markCount = marks.count
+        view?.setNeedsDisplay()
+    }
+
     // MARK: - 카메라
+
+    /// 지금 시점의 (투영 × 시점, 시점) 행렬
+    private func matrices(aspect: Float) -> (viewProjection: simd_float4x4, view: simd_float4x4) {
+        let viewMatrix = PointCloudRenderer.lookAt(eye: eyePosition(), target: target)
+        let near = max(0.003, distance * 0.01)
+        let far = distance + sceneRadius * 4 + 1
+        let projection = PointCloudRenderer.perspective(fovY: PointCloudRenderer.fieldOfView, aspect: aspect,
+                                                        near: near, far: far)
+        return (projection * viewMatrix, viewMatrix)
+    }
 
     private func eyePosition() -> SIMD3<Float> {
         let cp = cosf(pitch)
@@ -457,14 +550,9 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
               let screenPass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commandBuffer = queue.makeCommandBuffer() else { return }
 
-        let eye = eyePosition()
-        let viewMatrix = PointCloudRenderer.lookAt(eye: eye, target: target)
-        let near = max(0.003, distance * 0.01)
-        let far = distance + sceneRadius * 4 + 1
-        let projection = PointCloudRenderer.perspective(fovY: PointCloudRenderer.fieldOfView,
-                                                        aspect: Float(width) / Float(height), near: near, far: far)
+        let camera = matrices(aspect: Float(width) / Float(height))
         let pixelScale = max(1, Float(view.contentScaleFactor) / 2)
-        var uniforms = PointUniforms(viewProjection: projection * viewMatrix, view: viewMatrix,
+        var uniforms = PointUniforms(viewProjection: camera.viewProjection, view: camera.view,
                                      pointSize: pointSize,
                                      projScale: Float(height) / (2 * tanf(PointCloudRenderer.fieldOfView / 2)),
                                      minDiameter: 2 * PointCloudRenderer.minRadiusPx * pixelScale,
@@ -490,6 +578,17 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
             encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<PointUniforms>.stride, index: 1)
             encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: pointCount)
+            if let marks = markBuffer, markCount > 0 {
+                // 표시: 지름을 고정 (최소 = 최대), 깊이 검사 없이 위에
+                var markUniforms = uniforms
+                let diameter = 2 * CaptureTuning.previewMarkRadiusPx * pixelScale
+                markUniforms.minDiameter = diameter
+                markUniforms.maxDiameter = diameter
+                encoder.setDepthStencilState(markDepthState)
+                encoder.setVertexBuffer(marks, offset: 0, index: 0)
+                encoder.setVertexBytes(&markUniforms, length: MemoryLayout<PointUniforms>.stride, index: 1)
+                encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: markCount)
+            }
             encoder.endEncoding()
         }
 
@@ -512,9 +611,14 @@ final class PointCloudRenderer: NSObject, MTKViewDelegate, UIGestureRecognizerDe
 struct PointCloudView: UIViewRepresentable {
     let cloud: PreviewPointCloud
     let edl: Bool
+    /// 표시 (관 종류 핀). 바뀌면 다시 그린다
+    var marks: [PreviewMark] = []
+    /// 있으면 한 번 탭으로 그 자리의 색 점을 고른다 (굴착 기록)
+    var onPick: ((SIMD3<Float>) -> Void)? = nil
 
     final class Coordinator {
         var renderer: PointCloudRenderer?
+        var shownMarks: [PreviewMark] = []
     }
 
     func makeCoordinator() -> Coordinator {
@@ -524,7 +628,10 @@ struct PointCloudView: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         if let renderer = PointCloudRenderer(cloud: cloud) {
             renderer.edlEnabled = edl
+            renderer.onPick = onPick
+            renderer.setMarks(marks.map { (position: $0.position, color: $0.utilityClass.color) })
             context.coordinator.renderer = renderer
+            context.coordinator.shownMarks = marks
             return renderer.makeView()
         }
         let result = PreviewSceneLoader.makePointScene(cloud.points, eye: cloud.eye, voxel: cloud.voxel)
@@ -552,6 +659,19 @@ struct PointCloudView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.renderer?.edlEnabled = edl
+        guard let renderer = context.coordinator.renderer else { return }
+        renderer.edlEnabled = edl
+        renderer.onPick = onPick
+        if context.coordinator.shownMarks != marks {
+            context.coordinator.shownMarks = marks
+            renderer.setMarks(marks.map { (position: $0.position, color: $0.utilityClass.color) })
+        }
     }
+}
+
+/// 미리보기에 그리는 표시 하나 (marks.json kind=utility)
+struct PreviewMark: Equatable {
+    var id: Int
+    var position: SIMD3<Float>
+    var utilityClass: UtilityClass
 }

@@ -35,6 +35,11 @@ final class ExposureController {
     private var timer: Timer?
     private let targetDuration = CMTime(value: 1, timescale: 250)
 
+    /// 이 화면에서만 설정 대신 쓸 모드 (굴착 기록은 3D 품질을 위해 빠른 셔터로 고정). nil = 설정값
+    var forcedMode: Mode?
+
+    var effectiveMode: Mode { forcedMode ?? ExposureController.currentMode }
+
     /// 세션이 돌고 있을 때 부른다 (session.run 뒤 0.5 초쯤). 모드가 auto 면 자동 노출로 되돌린다.
     func apply() {
         stop()
@@ -42,7 +47,7 @@ final class ExposureController {
             print("ExposureController: 카메라 장치를 가져올 수 없습니다 (세션이 아직 안 돌거나 iOS 16 미만)")
             return
         }
-        switch ExposureController.currentMode {
+        switch effectiveMode {
         case .auto:
             configure(device) { d in
                 if d.isExposureModeSupported(.continuousAutoExposure) {

@@ -98,14 +98,14 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
   LiDAR 깊이로 그 자리의 월드 좌표를 구해 핀을 띄우고 진동한다. 길게 누르거나 '선' 버튼 뒤 두 점을 찍으면 균열 선분, '되돌리기' 는 마지막 표시를 지운다.
   녹화를 마치면 `marks.json`(odometry.csv 와 같은 폴더, 같은 ARKit 월드 좌표, 형식 문서 참고)을 쓰고 표시가 없으면 만들지 않는다.
   미리보기 요약에 "균열 표시 N개", `meta.json` area 에 `crack_marks`. 기준값은 모두 `CaptureTuning` 에 있다.
-- **⛏ 굴착 기록** (2026-11-10, 새 스캔 화면 맨 위 모드): 되메우기 전에 드러난 배관·케이블을 찍어 서버가 관(중심선·직경·지표~관 윗면 깊이·종류)을 뽑는다.
-  녹화 화면 위 오른쪽에 진행 체크리스트(기준 표식 3~4개 붙임 · 시작 주변 지면 3~5 m · 가장자리 양쪽 왕복 0/2 · 관 종류 표시 · 끝 주변 지면 — 표식·시작·끝은
-  눌러서 직접 체크도 됨)와 거리 배지(0.5~3 m)·기울기. 시작·끝 주변은 화면 중앙이 2.5 m 넘게(또는 LiDAR 밖) 1.5초 보이면, 왕복은 수평 이동 주축(PCA)을 따라
-  1 m 넘게 갔다가 0.5 m 넘게 돌아서면 한 구간([FrameQuality.swift](StrayScanner/Kgeo/FrameQuality.swift) `TrenchPassCounter`). 트렌치를 볼 때 기울기가
-  15° 미만·70° 초과면 '30~45°' 안내. 4K 무음 사진은 면 촬영과 같은 방식으로 약 1 m·15° 마다. 아래 '관: 종류 ▾'(가스·상수·하수·전력·통신·난방·모름)를
-  고르고 관을 탭하면 marks.json 에 `{"kind":"utility","class":"gas",…}`. 프레임마다 위치를 `gnss.csv` 로([GnssLog.swift](StrayScanner/Kgeo/GnssLog.swift)),
-  MFi RTK 수신기(Emlid Reach RX2·Bad Elf Flex)를 연결하면 iOS 위치가 그 값이 되고 수평 정확도 5 cm 이하면 위 왼쪽에 초록 'RTK' 배지.
-  안전 문구(트렌치에 들어가지 말 것·셀카봉), 물 빼고 찍기 안내. 요약에 왕복·체크·관 표시·RTK 비율. 기준값은 모두 `CaptureTuning`.
+- **⛏ 굴착 기록** (2026-11-10, 새 스캔 화면 맨 위 모드, 간편함 우선): 되메우기 전에 드러난 배관·케이블을 찍어 서버가 관(중심선·직경·지표~관 윗면
+  깊이·종류)을 뽑는다. 녹화 버튼 하나로 찍고, 화면 아래 한 줄 안내만 진행에 따라 바뀐다(주변 지면 3~5 m → 가장자리 따라 양쪽 왕복 n/2 → 끝에 주변 지면;
+  강요하는 체크리스트는 없음). 시작·끝 주변은 화면 중앙이 2.5 m 넘게(또는 LiDAR 밖) 1.5초 보이면, 왕복은 수평 이동 주축(PCA)을 따라 1 m 넘게 갔다가
+  0.5 m 넘게 돌아서면 한 구간([FrameQuality.swift](StrayScanner/Kgeo/FrameQuality.swift) `TrenchPassCounter`). 3D 품질: 4K 무음 사진을 면 촬영과 같은 방식으로
+  약 1 m·15° 마다, 빠른 셔터(1/250) 고정(설정과 상관없이), 흔들림 '천천히' 경고, 거리 배지 0.5~3 m. 녹화 뒤 색 점 미리보기에서 관을 한 번 탭하면
+  종류(가스·상수·하수·전력·통신·난방·모름)를 골라 marks.json 에 `{"kind":"utility","class":"gas",…,"source":"preview"}`(마지막 지우기 가능).
+  프레임마다 폰 위치를 `gnss.csv` 로([GnssLog.swift](StrayScanner/Kgeo/GnssLog.swift)). 안전 문구(트렌치에 들어가지 말 것), 기준 표식은 '있으면 좋음'.
+  RTK 연동은 나중 단계. 기준값은 모두 `CaptureTuning`.
 - **관리 대상(장소)** ([SiteClient.swift](StrayScanner/Kgeo/SiteClient.swift), 2026-11-09): 같은 벽·구역을 날짜별로 다시 찍어 위험요소 변화를
   비교하도록 새 스캔 화면에서 '없음 / 근처 장소 / 새 장소' 를 고른다(기본 없음). 근처 장소는 지금 GPS(지도 선택이면 그 점)로 반경 300 m 를 묻고,
   실패하면 이름 직접 입력. 새 장소는 바로 서버에 만들거나 이름만 저장해 업로드 직전에 만든다. 녹화 화면 위 왼쪽에 그 장소의 지난 점검 사진
@@ -125,7 +125,7 @@ Mac 과 Apple Developer Program 없이 돌아가는 **무과금 경로**로 만�
 |---|---|
 | `POST {서버}/upload.py` multipart | `title`, `note`, `mode=stray`, `scan_type=home|survey`(모드), `lon`, `lat`, `elev`(선택), `heading`(선택), `scan_zip`(zip), `client_id`(녹화마다 한 번 만든 UUID, 재시도해도 같음), `app`. 응답 `{"job_id": "...", "mode": "stray", "scan_type": "home"}` 또는 `{"error": "..."}`. 같은 제목·같은 zip 이름으로 24시간 안에 만든 작업이 있으면 서버가 새로 만들지 않고 그 `job_id` 를 `"duplicate": true` 와 함께 돌려준다 |
 | `GET {서버}/status.py?job_id=` | `{status, step 0..7, step_name, message, title, mode, scan_type, thumb_url, scene_item_id, glb_url}` — `done`/`failed` 가 될 때까지 3초마다 조회 |
-| 굴착 기록 필드 | 모드 '⛏ 굴착 기록' 이면 `scan_type=survey` + `trench_mode=1` (`area_mode` 는 보내지 않음). zip 에 `hires/` + `hires/poses.json`(약 1 m·15° 마다 4K 무음 사진), `gnss.csv`(프레임마다 위치), `marks.json`(kind `utility`, class 관 종류)이 함께 간다. 서버는 utilities.json 을 만든다 (`kgeodata/3dscan_upgrade/docs/utility_contract.md`) |
+| 굴착 기록 필드 | 모드 '⛏ 굴착 기록' 이면 `scan_type=survey` + `trench_mode=1` (`area_mode` 는 보내지 않음). zip 에 `hires/` + `hires/poses.json`(약 1 m·15° 마다 4K 무음 사진), `gnss.csv`(프레임마다 폰 위치), 미리보기에서 표시했으면 `marks.json`(kind `utility`, class 관 종류)이 함께 간다. 서버는 utilities.json 을 만든다 (`kgeodata/3dscan_upgrade/docs/utility_contract.md`) |
 | 관리 대상(장소) | `GET {서버}/sites.py?lat=&lon=&radius_m=300` → `{"sites":[{site_id, name, distance_m, scans, last_scan_at, last_job_id, last_thumb_url, …}]}` (새 스캔 화면 '근처 장소'), `POST {서버}/sites.py` multipart `name`, `lat`, `lon`, `note` → `{"site_id","name"}` ('새 장소', 400/415 면 한 번 urlencoded 로). 고른 장소는 업로드 필드 `site_id`(선택)와 `meta.json` 의 `site` 로. sites.py 가 없거나(404) 오프라인이면 이름만 저장하고 업로드 직전에 만들며, 그것도 실패하면 `site_id` 없이 올린다 |
 | 물체 모드 필드 | 현장조사 + 물체 모드일 때 `object_mode=1`. 물체를 지정했으면 `obj_center="x,y,z"`(미터, ARKit 월드 좌표 = `odometry.csv` 좌표계, 소수 4자리), `obj_radius="0.15"`(미터, 기본 0.15), `obj_coverage="0..100"`(방위 커버리지 %). 지정하지 않았으면 `obj_center` 없이 `object_mode=1` 만 (서버가 카메라 시선 교점으로 자동 계산). 서버는 구 안에서 받침면 위로 솟은 덩어리를 물체로 보고 더 좁혀 자른다 |
 | 진행 페이지 | `{서버}` 의 `3dupload` 를 `3dscan` 으로 바꾼 주소 + `?job=<job_id>` — 사이트가 7단계 진행과 결과를 이어서 보여 준다 ("웹에서 진행 보기" 버튼) |

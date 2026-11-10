@@ -57,11 +57,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         manager.stopUpdatingHeading()
     }
 
-    /// 굴착 기록: 가장 높은 정확도로 (외부 RTK 수신기를 연결하면 iOS 가 그 값을 준다). 화면을 닫을 때 false
-    func setNavigationAccuracy(_ on: Bool) {
-        manager.desiredAccuracy = on ? kCLLocationAccuracyBestForNavigation : kCLLocationAccuracyBest
-    }
-
     /// 위치를 버리고 새로 잡는다 ("다시 잡기")
     func restart() {
         manager.stopUpdatingLocation()
