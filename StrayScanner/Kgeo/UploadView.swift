@@ -261,6 +261,10 @@ final class UploadViewModel: ObservableObject {
             body.addField("scan_type", meta.isObjcap ? ScanMode.survey.rawValue : meta.mode.rawValue)
             body.addField("client_id", meta.clientId ?? "")
             body.addField("app", "kgeoScan \(KgeoDefaults.appVersion)")
+            if meta.capture == "trench" || meta.trench != nil {
+                // 굴착 기록: 서버가 관(중심선·직경·깊이·종류)을 뽑는다. hires/·gnss.csv·marks.json 은 zip 에 함께
+                body.addField("trench_mode", "1")
+            }
             if let siteId = meta.site?.id, !siteId.isEmpty {
                 // 관리 대상(장소): 같은 장소의 이전 점검과 변화를 비교한다
                 body.addField("site_id", siteId)

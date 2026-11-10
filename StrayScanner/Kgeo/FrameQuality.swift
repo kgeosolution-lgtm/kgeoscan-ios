@@ -12,6 +12,7 @@
 //  - FrameQualityWriter: 녹화 폴더의 frame_quality.csv (frame,timestamp,blur_px,tracking,omega_dps,speed_mps).
 //      frame 은 odometry.csv · depth/ · rgb.mp4 와 같은 번호다. 서버가 흔들린·추적 불량 프레임을 덜 쓰는 데 쓴다.
 //  - InPlaceRotationDetector: 최근 3초 동안 방향은 45° 넘게 바뀌었는데 위치는 0.3 m 안이면 '제자리 회전' (방 모드).
+//  - TrenchPassCounter: 굴착 기록에서 트렌치 가장자리를 따라 간 구간(왕복) 세기 (주축 PCA + 되돌아섬).
 //  - DistanceAdvice: 화면 중앙 깊이로 모드별 권장 거리 배지 (면 촬영은 정지 사진 0.6 mm/px 기준,
 //      균열 근접 모드는 예상 해상도 mm/px 를 0.25 / 0.4 기준으로 녹색·황색·적색).
 //  (Stray Scanner 포크에 추가된 파일)
@@ -100,6 +101,35 @@ enum CaptureTuning {
     static let markLongPress: TimeInterval = 0.5
     /// 탭 결과 안내를 보여 주는 시간 (초)
     static let noticeSeconds: TimeInterval = 1.5
+
+    // MARK: 굴착 기록 (⛏ 트렌치, utility_contract.md)
+    /// 거리 권장 (m): 0.5~3 m 녹색
+    static let trenchDistance: (near: Float, far: Float) = (0.5, 3.0)
+    /// 거리·속도·회전 경고 (CaptureGuide.trench). LiDAR 는 약 5 m 까지
+    static let trenchGuideMinDistance: Float = 0.4
+    static let trenchGuideMaxDistance: Float = 4.0
+    static let trenchGuideMaxSpeed: Float = 0.5
+    static let trenchGuideMaxRotation: Float = 45
+    /// 폰을 트렌치 안쪽으로 기울이는 각 (카메라가 수평 아래로 내려다보는 각, °): 권장 30~45, 15 미만·70 초과면 안내
+    static let trenchTiltNear: Float = 30
+    static let trenchTiltFar: Float = 45
+    static let trenchTiltLow: Float = 15
+    static let trenchTiltHigh: Float = 70
+    /// 근경·원경 정지 사진 간격: 약 1 m 이동 또는 15° 회전
+    static let trenchHiresMove: Float = 1.0
+    static let trenchHiresTurn: Float = 15
+    /// 왕복 세기: 한 구간 최소 길이, 되돌아섬 판정 거리 (m, 주축 방향)
+    static let trenchPassMinLeg: Float = 1.0
+    static let trenchPassReverse: Float = 0.5
+    /// 시작·끝 주변 지면: 화면 중앙이 2.5 m 넘게(또는 LiDAR 밖) 1.5초 이어지면. 시작은 녹화 40초 안, 끝은 20초 뒤부터
+    static let trenchContextDepth: Float = 2.5
+    static let trenchContextHold: TimeInterval = 1.5
+    static let trenchStartWindow: TimeInterval = 40
+    static let trenchEndAfter: TimeInterval = 20
+
+    // MARK: GNSS (굴착 기록 gnss.csv, RTK 배지)
+    /// 수평 정확도가 이 값(m) 이하이면 화면에 RTK 배지
+    static let rtkHorizontalAccuracy: Double = 0.05
 
     // MARK: 관리 대상(장소) — 서버 sites.py
     /// 근처 장소를 찾는 반경 (m)
@@ -417,6 +447,98 @@ final class InPlaceRotationDetector {
     }
 }
 
+/// 굴착 기록: 트렌치 가장자리를 따라 간 구간 세기. 10 Hz 정도로 카메라 위치를 넣으면 지금까지의 수평 위치 주축(PCA)을 따라
+/// 1 m 넘게 간 뒤 0.5 m 넘게 되돌아설 때마다 한 구간으로 센다. 양쪽 가장자리를 한 번씩 = 2 구간 (값은 CaptureTuning)
+final class TrenchPassCounter {
+    private var count = 0.0
+    private var sumX = 0.0
+    private var sumZ = 0.0
+    private var sumXX = 0.0
+    private var sumZZ = 0.0
+    private var sumXZ = 0.0
+    private var legStart: SIMD2<Float>?
+    private var extreme: SIMD2<Float>?
+    private var direction: Float = 0
+    /// 끝난 구간 수
+    private(set) var legs = 0
+
+    func reset() {
+        count = 0
+        sumX = 0
+        sumZ = 0
+        sumXX = 0
+        sumZZ = 0
+        sumXZ = 0
+        legStart = nil
+        extreme = nil
+        direction = 0
+        legs = 0
+    }
+
+    /// 지금 가는 구간도 1 m 넘었으면 친 수 (끝에서 되돌아서지 않고 멈춘 경우)
+    var legsIncludingCurrent: Int {
+        guard let start = legStart, let far = extreme else { return legs }
+        let axis = mainAxis()
+        return legs + (abs(simd_dot(far - start, axis)) >= CaptureTuning.trenchPassMinLeg ? 1 : 0)
+    }
+
+    /// 한 구간을 막 마쳤으면 true
+    @discardableResult
+    func update(position: SIMD3<Float>) -> Bool {
+        let point = SIMD2<Float>(position.x, position.z)
+        let x = Double(point.x)
+        let z = Double(point.y)
+        count += 1
+        sumX += x
+        sumZ += z
+        sumXX += x * x
+        sumZZ += z * z
+        sumXZ += x * z
+        guard let start = legStart, let far = extreme else {
+            legStart = point
+            extreme = point
+            return false
+        }
+        let axis = mainAxis()
+        let now = simd_dot(point, axis)
+        let startS = simd_dot(start, axis)
+        let farS = simd_dot(far, axis)
+        if direction == 0 {
+            let moved = now - startS
+            if abs(moved) >= CaptureTuning.trenchPassReverse {
+                direction = moved > 0 ? 1 : -1
+                extreme = point
+            }
+            return false
+        }
+        if (now - farS) * direction > 0 {
+            extreme = point
+            return false
+        }
+        if (farS - now) * direction >= CaptureTuning.trenchPassReverse
+            && abs(farS - startS) >= CaptureTuning.trenchPassMinLeg {
+            legs += 1
+            legStart = far
+            extreme = point
+            direction = -direction
+            return true
+        }
+        return false
+    }
+
+    /// 수평 위치(x, z)의 주축 (단위 벡터)
+    private func mainAxis() -> SIMD2<Float> {
+        guard count >= 2 else { return SIMD2<Float>(1, 0) }
+        let meanX = sumX / count
+        let meanZ = sumZ / count
+        let cxx = sumXX / count - meanX * meanX
+        let czz = sumZZ / count - meanZ * meanZ
+        let cxz = sumXZ / count - meanX * meanZ
+        let angle = 0.5 * atan2(2 * cxz, cxx - czz)
+        return SIMD2<Float>(Float(cos(angle)), Float(sin(angle)))
+    }
+}
+
 /// 거리 배지: 화면 중앙 깊이(물체 모드는 물체까지)를 모드별 권장 범위와 비교
 struct DistanceAdvice {
     /// 배지 색
@@ -438,6 +560,7 @@ struct DistanceAdvice {
     static let room = Band(near: CaptureTuning.roomDistance.near, far: CaptureTuning.roomDistance.far)
     static let object = Band(near: CaptureTuning.objectDistance.near, far: CaptureTuning.objectDistance.far)
     static let survey = Band(near: CaptureTuning.surveyDistance.near, far: CaptureTuning.surveyDistance.far)
+    static let trench = Band(near: CaptureTuning.trenchDistance.near, far: CaptureTuning.trenchDistance.far)
 
     /// 면 촬영: 목표 지상 해상도(0.6 mm/px)가 되는 거리까지 (안내 상한 1.2 m 이내). 가까운 쪽은 LiDAR·한 장의 넓이로 0.4 m
     static func area(stillFx: Float) -> Band {

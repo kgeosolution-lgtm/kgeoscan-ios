@@ -26,6 +26,8 @@ class DatasetEncoder {
     private let distortionEncoder: DistortionEncoder
     /// kgeoScan: frame_quality.csv (흔들림 예측·트래킹 상태, 프레임 번호는 odometry.csv 와 같다)
     private let qualityWriter: FrameQualityWriter
+    /// kgeoScan: 굴착 기록의 gnss.csv (프레임 번호는 odometry.csv 와 같다). 다른 모드는 nil
+    private let gnssWriter: GnssWriter?
     private var lastFrame: ARFrame?
     private var dispatchGroup = DispatchGroup()
     private var currentFrame: Int = -1
@@ -51,7 +53,8 @@ class DatasetEncoder {
     private var latestGyroscopeData: (timestamp: Double, data: simd_double3)?
 
 
-    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1, outputVideoSize: CGSize? = nil) {
+    init(arConfiguration: ARWorldTrackingConfiguration, fpsDivider: Int = 1, outputVideoSize: CGSize? = nil,
+         recordGnss: Bool = false) {
         self.frameInterval = fpsDivider
         self.queue = DispatchQueue(label: "encoderQueue")
 
@@ -77,10 +80,11 @@ class DatasetEncoder {
         self.imuEncoder = IMUEncoder(url: self.imuPath)
         self.distortionEncoder = DistortionEncoder(datasetDirectory: datasetDirectory)
         self.qualityWriter = FrameQualityWriter(directory: datasetDirectory)
+        self.gnssWriter = recordGnss ? GnssWriter(directory: datasetDirectory) : nil
     }
 
     /// kgeoScan: quality 가 있으면 저장되는 프레임마다 frame_quality.csv 한 행을 같은 프레임 번호로 쓴다
-    func add(frame: ARFrame, quality: FrameQualitySample? = nil) {
+    func add(frame: ARFrame, quality: FrameQualitySample? = nil, gnss: GnssSample? = nil) {
         let totalFrames: Int = currentFrame
         currentFrame = currentFrame + 1
         if (currentFrame % frameInterval != 0) {
@@ -112,6 +116,9 @@ class DatasetEncoder {
             self.odometryEncoder.add(frame: frame, currentFrame: frameNumber)
             if let quality = quality {
                 self.qualityWriter.add(quality, frame: frameNumber)
+            }
+            if let gnss = gnss {
+                self.gnssWriter?.add(gnss, frame: frameNumber, timestamp: frame.timestamp)
             }
             self.distortionEncoder.add(frame: frame, currentFrame: frameNumber)
             self.lastFrame = frame
@@ -157,6 +164,7 @@ class DatasetEncoder {
         self.imuEncoder.done()
         self.odometryEncoder.done()
         self.qualityWriter.done()
+        self.gnssWriter?.done()
         self.distortionEncoder.done()
         writeIntrinsics()
         switch self.rgbEncoder.status {

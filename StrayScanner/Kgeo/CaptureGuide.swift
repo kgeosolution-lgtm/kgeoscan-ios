@@ -81,6 +81,13 @@ final class CaptureGuide {
                                   maxRotation: CaptureTuning.crackGuideMaxRotation,
                                   tooCloseText: "너무 가깝습니다 (%.2f m) — 균열 근접은 30~50 cm",
                                   tooFarText: "균열 근접 모드: 더 다가가세요 (%.1f m, 권장 30~50 cm)")
+    /// 굴착 기록: 트렌치 가장자리에서 0.5~3 m (값은 CaptureTuning)
+    static let trench = Thresholds(minDistance: CaptureTuning.trenchGuideMinDistance,
+                                   maxDistance: CaptureTuning.trenchGuideMaxDistance,
+                                   maxSpeed: CaptureTuning.trenchGuideMaxSpeed,
+                                   maxRotation: CaptureTuning.trenchGuideMaxRotation,
+                                   tooCloseText: "너무 가깝습니다 (%.2f m) — 50 cm 이상 떨어지세요",
+                                   tooFarText: "너무 멉니다 (%.1f m) — 가장자리에서 3 m 이내로")
     /// 물체 모드: 물체까지 35~90 cm
     static let object = Thresholds(minDistance: 0.35, maxDistance: 0.9, maxSpeed: 0.5, maxRotation: 60,
                                    tooCloseText: "너무 가깝습니다 (%.2f m) — 35 cm 이상 떨어지세요",

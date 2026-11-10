@@ -25,6 +25,8 @@
 //    '되돌리기' = 마지막 표시 지우기 → marks.json (CrackMarks.swift).
 //  - 관리 대상(장소)을 골랐으면 위 왼쪽에 그 장소의 지난 점검 사진(반투명, 탭하면 크게)과 '지난번에 붙인 표식이 함께 찍히게' 안내.
 //    정밀 정렬은 서버가 표식·특징점으로 하므로 앱은 참고 그림만 보여 준다.
+//  - 굴착 기록(⛏ 트렌치): 진행 체크리스트(표식·시작 주변·양쪽 왕복·관 표시·끝 주변), 기울기 30~45° 안내, 약 1 m 마다 4K 사진,
+//    관을 탭해 종류 표시(marks.json kind=utility), 프레임마다 위치 gnss.csv, 수평 정확도 5 cm 이하면 RTK 배지.
 //  녹화 데이터(DatasetEncoder 이하)는 원본 그대로다.
 //
 
@@ -38,6 +40,7 @@ import CoreMotion
 import CoreImage
 import ImageIO
 import AVFoundation
+import CoreLocation
 import simd
 
 let FpsDividers: [Int] = [1, 2, 4, 12, 60]
@@ -204,6 +207,24 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private var siteThumbWidth: NSLayoutConstraint?
     private var siteThumbHeight: NSLayoutConstraint?
 
+    // 굴착 기록 (⛏ 트렌치): 왕복 세기·진행 체크리스트·관 종류 표시·gnss.csv
+    private var trenchMode = false
+    /// 고해상도 정지 사진(hires/)을 찍는 모드: 면 촬영 또는 굴착 기록
+    private var hiresMode = false
+    private let passCounter = TrenchPassCounter()
+    private var trenchMarkersPlaced = false
+    private var trenchStartContext = false
+    private var trenchEndContext = false
+    private var contextFarSeconds: TimeInterval = 0
+    private var lastTrenchUpdate: TimeInterval = 0
+    private var utilityClass: UtilityClass = .unknown
+    private let utilityButton = UIButton(type: .system)
+    private let checklistStack = UIStackView()
+    private var checklistButtons: [String: UIButton] = [:]
+    private var gnssRows = 0
+    private var gnssRTKRows = 0
+    private var gnssAccessorySeen = false
+
     func setDismissFunction(_ fn: Optional<() -> Void>) {
         self.dismissFunction = fn
     }
@@ -221,10 +242,14 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
         objectMode = scanMeta?.objectMode ?? false
         areaMode = scanMeta?.capture == "area"
+        trenchMode = scanMeta?.capture == "trench"
+        hiresMode = areaMode || trenchMode
         areaSurface = scanMeta?.area?.surface ?? "auto"
         crackMode = areaMode && scanMeta?.area?.crackMode == true
         if areaMode {
             guide.thresholds = crackMode ? CaptureGuide.crack : CaptureGuide.area
+        } else if trenchMode {
+            guide.thresholds = CaptureGuide.trench
         } else if objectMode {
             guide.thresholds = CaptureGuide.object
         } else {
@@ -237,8 +262,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         if objectMode {
             setupObjectViews()
         }
-        if areaMode {
+        if areaMode || trenchMode {
             setupMarkViews()
+        }
+        if trenchMode {
+            setupTrenchViews()
         }
         if scanMeta?.site != nil {
             setupSiteViews()
@@ -270,6 +298,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         geoLabelTimer = nil
         exposure.stop()
         datasetEncoder = nil
+        if trenchMode {
+            LocationService.shared.setNavigationAccuracy(false)
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -419,6 +450,176 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
     }
 
+    // MARK: - 굴착 기록 (⛏ 트렌치)
+
+    /// 위 오른쪽(거리 배지 아래) 진행 체크리스트. 표식·시작·끝은 눌러서 직접 체크할 수도 있다 (왕복·관 표시는 앱이 센다)
+    private func setupTrenchViews() {
+        checklistStack.translatesAutoresizingMaskIntoConstraints = false
+        checklistStack.axis = .vertical
+        checklistStack.alignment = .trailing
+        checklistStack.spacing = 4
+        for key in ["markers", "start", "passes", "utility", "end"] {
+            let button = UIButton(type: .system)
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+            button.setTitleColor(.white, for: .normal)
+            button.layer.cornerRadius = 7
+            button.contentEdgeInsets = UIEdgeInsets(top: 3, left: 8, bottom: 3, right: 8)
+            button.accessibilityIdentifier = key
+            button.addTarget(self, action: #selector(checklistTapped(_:)), for: .touchUpInside)
+            checklistStack.addArrangedSubview(button)
+            checklistButtons[key] = button
+        }
+        view.addSubview(checklistStack)
+        let safe = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            checklistStack.topAnchor.constraint(equalTo: distanceLabel.bottomAnchor, constant: 8),
+            checklistStack.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+        ])
+        updateChecklist()
+        // 외부 RTK 수신기가 있으면 그 값을 가장 높은 정확도로 받는다
+        LocationService.shared.setNavigationAccuracy(true)
+    }
+
+    @objc private func checklistTapped(_ sender: UIButton) {
+        switch sender.accessibilityIdentifier ?? "" {
+        case "markers":
+            trenchMarkersPlaced.toggle()
+        case "start":
+            trenchStartContext.toggle()
+        case "end":
+            trenchEndContext.toggle()
+        default:
+            showNotice("왕복과 관 표시는 앱이 셉니다")
+            return
+        }
+        updateChecklist()
+    }
+
+    private func updateChecklist() {
+        guard trenchMode else { return }
+        let legs = passCounter.legsIncludingCurrent
+        let items: [(key: String, done: Bool, title: String)] = [
+            ("markers", trenchMarkersPlaced, "기준 표식 3~4개 붙임"),
+            ("start", trenchStartContext, "시작: 주변 지면·연석 3~5 m"),
+            ("passes", legs >= 2, "가장자리 양쪽 왕복 \(min(legs, 9))/2"),
+            ("utility", !crackMarks.isEmpty, "관 종류 표시 \(crackMarks.count)"),
+            ("end", trenchEndContext, "끝: 주변 지면 다시"),
+        ]
+        for item in items {
+            guard let button = checklistButtons[item.key] else { continue }
+            button.setTitle((item.done ? "✓ " : "○ ") + item.title, for: .normal)
+            button.backgroundColor = item.done ? UIColor.systemGreen.withAlphaComponent(0.75)
+                : UIColor.black.withAlphaComponent(0.55)
+        }
+    }
+
+    /// [관: 종류 ▾] 메뉴: 가스·상수·하수·전력·통신·난방·모름
+    private func makeUtilityMenu() -> UIMenu {
+        let actions = UtilityClass.allCases.map { item in
+            UIAction(title: item.label, state: item == utilityClass ? .on : .off) { [weak self] _ in
+                self?.utilityClass = item
+                self?.updateMarkButtons()
+            }
+        }
+        return UIMenu(title: "관 종류 — 고른 뒤 화면의 관을 탭", children: actions)
+    }
+
+    private func resetTrenchProgress() {
+        passCounter.reset()
+        trenchStartContext = false
+        trenchEndContext = false
+        contextFarSeconds = 0
+        lastTrenchUpdate = 0
+        gnssRows = 0
+        gnssRTKRows = 0
+        gnssAccessorySeen = false
+        updateChecklist()
+    }
+
+    /// 10 Hz: 왕복 세기, 시작·끝 주변 지면 (화면 중앙이 2.5 m 넘게 멀거나 LiDAR 밖이 1.5초)
+    private func updateTrenchProgress(frame: ARFrame, depth: Float?, capturing: Bool) {
+        guard trenchMode, capturing else { return }
+        let dt = lastTrenchUpdate > 0 ? min(frame.timestamp - lastTrenchUpdate, 0.5) : 0
+        lastTrenchUpdate = frame.timestamp
+        let position = frame.camera.transform.columns.3
+        if passCounter.update(position: SIMD3<Float>(position.x, position.y, position.z)) {
+            markHaptic.impactOccurred()
+            showNotice(passCounter.legs >= 2 ? "왕복 \(passCounter.legs)구간 — 양쪽을 다 찍었습니다"
+                       : "1구간 끝 — 반대쪽 가장자리를 따라 돌아오며 찍으세요")
+        }
+        var far = true
+        if let d = depth {
+            far = d >= CaptureTuning.trenchContextDepth
+        }
+        contextFarSeconds = far ? contextFarSeconds + dt : 0
+        let elapsed = captureStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        if !trenchStartContext && elapsed <= CaptureTuning.trenchStartWindow
+            && contextFarSeconds >= CaptureTuning.trenchContextHold {
+            trenchStartContext = true
+            markHaptic.impactOccurred()
+            showNotice("✓ 시작 주변 지면 — 이제 트렌치 가장자리를 따라 찍으세요")
+        } else if trenchStartContext && !trenchEndContext && passCounter.legsIncludingCurrent >= 1
+                    && elapsed >= CaptureTuning.trenchEndAfter && contextFarSeconds >= CaptureTuning.trenchContextHold {
+            trenchEndContext = true
+            markHaptic.impactOccurred()
+            showNotice("✓ 끝 주변 지면 — 다 찍었으면 멈추세요")
+        }
+        updateChecklist()
+    }
+
+    /// 카메라가 수평 아래로 내려다보는 각 (°): 0 = 수평, 90 = 바로 아래
+    private func trenchTilt(frame: ARFrame) -> Float {
+        let up = max(-1, min(1, frame.camera.transform.columns.2.y))
+        return asin(up) * 180 / Float.pi
+    }
+
+    /// 트렌치를 볼 때(가까운 깊이)만: 30~45° 권장, 15° 미만이면 더 기울이고 70° 넘으면 덜 내려다보게
+    private func trenchTiltWarning(frame: ARFrame, depth: Float?) -> String? {
+        guard let d = depth, d < CaptureTuning.trenchContextDepth else { return nil }
+        let tilt = trenchTilt(frame: frame)
+        let range = "\(Int(CaptureTuning.trenchTiltNear))~\(Int(CaptureTuning.trenchTiltFar))°"
+        if tilt < CaptureTuning.trenchTiltLow {
+            return "폰을 트렌치 안쪽으로 더 기울이세요 (\(range), 지금 \(Int(tilt.rounded()))°)"
+        }
+        if tilt > CaptureTuning.trenchTiltHigh {
+            return "너무 내려다봅니다 — \(range) 로 비스듬히, 반대쪽 벽까지 보이게 (지금 \(Int(tilt.rounded()))°)"
+        }
+        return nil
+    }
+
+    private func trenchHint() -> String {
+        let photos = hiresCount > 0 ? " · 사진 \(hiresCount)장" : ""
+        if startedRecording == nil {
+            return "⚠︎ 트렌치 안에 들어가지 마세요 · 기준 표식 3~4개를 붙이고, 시작은 주변 지면·연석·맨홀이 3~5 m 보이게"
+        }
+        if !trenchStartContext {
+            return "먼저 주변 지면·연석·맨홀이 3~5 m 들어가게 천천히 둘러보세요" + photos
+        }
+        let legs = passCounter.legsIncludingCurrent
+        if legs < 2 {
+            return "가장자리를 따라 걸으며 안쪽으로 30~45° 기울여 찍으세요 (왕복 \(legs)/2) · 관은 탭해서 종류 표시" + photos
+        }
+        if !trenchEndContext {
+            return "양쪽을 다 찍었습니다 — 끝으로 주변 지면·연석을 3~5 m 넣고 멈추세요" + photos
+        }
+        return "다 찍었습니다 — 빠진 관이 있으면 탭해서 종류를 표시하고 멈추세요" + photos
+    }
+
+    /// 촬영 요약 경고: 왕복·주변 지면·표식
+    private func applyTrenchStats(_ stats: inout CaptureStats) {
+        guard trenchMode else { return }
+        let legs = passCounter.legsIncludingCurrent
+        if legs < 2 {
+            stats.warnings.append("트렌치 양쪽 왕복이 부족합니다 (\(legs)/2) — 반대쪽 가장자리에서도 찍어야 관의 아래쪽과 벽이 나옵니다")
+        }
+        if !trenchStartContext || !trenchEndContext {
+            stats.warnings.append("시작·끝에 주변 지면(연석·맨홀)을 3~5 m 넣지 않았습니다 — 원지반(깊이 기준)과 지도 맞춤이 약해집니다")
+        }
+        if !trenchMarkersPlaced {
+            stats.warnings.append("기준 표식 체크가 없습니다 — 표식 3~4개가 찍혀야 가설기준점·축척으로 씁니다")
+        }
+    }
+
     /// 관리 대상: 위 왼쪽에 장소 이름과 지난 점검 사진 (반투명, 탭하면 크게). 사진은 서버에서 받는다 (없거나 오프라인이면 이름만)
     private func setupSiteViews() {
         guard let site = scanMeta?.site else { return }
@@ -518,13 +719,23 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         return "지난번에 붙인 표식이 함께 찍히게 해 주세요"
     }
 
-    /// 면 촬영 균열 표시 버튼 [선] [되돌리기] (녹화 중에만 보인다)
+    /// 표시 버튼 (녹화 중에만 보인다): 면 촬영 [선] [되돌리기], 굴착 기록 [관: 종류 ▾] [되돌리기]
     private func setupMarkViews() {
-        styleButton(markLineButton, title: "선")
-        markLineButton.addTarget(self, action: #selector(markLineTapped), for: .touchUpInside)
+        let first: UIButton
+        if trenchMode {
+            // 굴착 기록: 관 종류를 고른 뒤 화면의 관을 탭
+            styleButton(utilityButton, title: "관: \(utilityClass.label) ▾")
+            utilityButton.showsMenuAsPrimaryAction = true
+            utilityButton.menu = makeUtilityMenu()
+            first = utilityButton
+        } else {
+            styleButton(markLineButton, title: "선")
+            markLineButton.addTarget(self, action: #selector(markLineTapped), for: .touchUpInside)
+            first = markLineButton
+        }
         styleButton(markUndoButton, title: "되돌리기")
         markUndoButton.addTarget(self, action: #selector(markUndoTapped), for: .touchUpInside)
-        let row = UIStackView(arrangedSubviews: [markLineButton, markUndoButton])
+        let row = UIStackView(arrangedSubviews: [first, markUndoButton])
         row.translatesAutoresizingMaskIntoConstraints = false
         row.axis = .horizontal
         row.spacing = 8
@@ -564,11 +775,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             config.planeDetection = objectMode ? [.horizontal, .vertical] : []
             defaultVideoFormat = config.videoFormat
             guide.reset()
-            if areaMode && areaSilentRequested {
+            if hiresMode && areaSilentRequested {
                 // 무음 정지 사진: 높은 해상도 형식을 하나씩 켜서 깊이·비율을 확인한 뒤 고른다
                 beginSilentFormatSearch(config)
             } else {
-                if areaMode {
+                if hiresMode {
                     useShutterStills(config)
                 }
                 session.run(config)
@@ -670,7 +881,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         // 무음 면 촬영으로 높은 해상도 형식이면 rgb.mp4 는 가로 1920 으로 줄여 녹화 (내부 파라미터도 환산)
         let captureSize = config.videoFormat.imageResolution
         var outputSize: CGSize?
-        if areaMode && hiresSource == .videoFrame && captureSize.width > 1920 {
+        if hiresMode && hiresSource == .videoFrame && captureSize.width > 1920 {
             let scale = 1920 / captureSize.width
             var scaledHeight = (captureSize.height * scale).rounded()
             if Int(scaledHeight) % 2 == 1 {
@@ -680,7 +891,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         }
         recordVideoSize = outputSize ?? captureSize
         datasetEncoder = DatasetEncoder(arConfiguration: config, fpsDivider: FpsDividers[chosenFpsSetting],
-                                        outputVideoSize: outputSize)
+                                        outputVideoSize: outputSize, recordGnss: trenchMode)
         statsLabel.isHidden = false
         hiresRecorder = nil
         hiresAccepting = false
@@ -690,7 +901,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         hiresSkipped = 0
         lastHiresTransform = nil
         lastHiresRequestTime = 0
-        if areaMode, let encoder = datasetEncoder {
+        if hiresMode, let encoder = datasetEncoder {
             hiresRecorder = try? HiresRecorder(datasetDirectory: encoder.directory.absoluteURL.standardizedFileURL)
             hiresAccepting = hiresRecorder != nil
         }
@@ -721,6 +932,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         rotationDetector.reset()
         markRow?.isHidden = false
         updateMarkButtons()
+        resetTrenchProgress()
         startRawIMU()
     }
 
@@ -776,6 +988,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             case .allGood:
                 var stats = guide.summary()
                 applyQualityStats(&stats)
+                applyTrenchStats(&stats)
                 if objectMode && objectTracker.isSet {
                     let coverage = objectTracker.coveragePercent
                     stats.coveragePct = coverage
@@ -787,7 +1000,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 // 품질 판단(다시 찍기)은 미리보기 화면에서 한다. 미리보기용 ARKit 메시는 지금 복사해 둔다
                 let mesh = meshSupported ? MeshSnapshot.capture(from: session.currentFrame) : nil
                 // 면 촬영: 남은 고해상도 사진 저장을 기다리고 hires/poses.json 을 쓴다
-                hiresWritten = hiresRecorder?.finish(surface: areaSurface, formatRecommended: hiresFormatRecommended,
+                hiresWritten = hiresRecorder?.finish(surface: trenchMode ? "trench" : areaSurface,
+                                                     formatRecommended: hiresFormatRecommended,
                                                      source: hiresSourceName, format: hiresFormatLabel,
                                                      videoSize: videoSizeText) ?? 0
                 hiresRecorder = nil
@@ -799,8 +1013,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func finishRecording(started: Date, encoder: DatasetEncoder, directory: URL, stats: CaptureStats,
                                  mesh: MeshSnapshot?) {
-        // 균열 표시가 있으면 marks.json (odometry.csv 와 같은 폴더, 같은 ARKit 월드 좌표)
-        if areaMode && !crackMarks.isEmpty {
+        // 균열·관 표시가 있으면 marks.json (odometry.csv 와 같은 폴더, 같은 ARKit 월드 좌표)
+        if (areaMode || trenchMode) && !crackMarks.isEmpty {
             do {
                 try CrackMarks.write(crackMarks, to: directory)
             } catch {
@@ -869,6 +1083,15 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                                  hiresFormat: hiresFormatLabel, videoSize: videoSizeText,
                                  crackMode: crackMode ? true : nil,
                                  crackMarks: crackMarks.isEmpty ? nil : crackMarks.count)
+        } else if trenchMode {
+            meta.capture = "trench"
+            meta.trench = TrenchInfo(mode: 1, hires: hiresWritten, hiresSkipped: hiresSkipped, hiresSource: hiresSourceName,
+                                     hiresFormat: hiresFormatLabel, videoSize: videoSizeText,
+                                     passes: passCounter.legsIncludingCurrent, markersPlaced: trenchMarkersPlaced,
+                                     startContext: trenchStartContext, endContext: trenchEndContext,
+                                     utilityMarks: crackMarks.count, gnssRows: gnssRows,
+                                     rtkRatio: gnssRows > 0 ? Float(gnssRTKRows) / Float(gnssRows) : nil,
+                                     gnssAccessory: gnssAccessorySeen ? true : nil)
         } else {
             meta.capture = "video"
         }
@@ -928,7 +1151,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             let frames = encoder.savedFrameCount
             var megabytes = Double(Int64(frames) * KgeoDefaults.bytesPerFrameEstimate) / 1_048_576
             var text: String
-            if areaMode {
+            if hiresMode {
                 megabytes += Double(hiresCount) * 3.5
                 text = String(format: "%d 프레임 · 고해상도 %d장 · ≈%.0f MB", frames, hiresCount, megabytes)
             } else {
@@ -952,7 +1175,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     @objc func viewTapped(_ gesture: UITapGestureRecognizer) {
         if objectMode {
             designateObject(at: gesture.location(in: sceneView))
-        } else if areaMode {
+        } else if areaMode || trenchMode {
             handleMarkTap(at: gesture.location(in: sceneView))
         } else {
             toggleOverlay()
@@ -1168,7 +1391,20 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             guard ready else { return }
             beginCapture()
         }
-        encoder.add(frame: frame, quality: quality)
+        var gnss: GnssSample?
+        if trenchMode {
+            // 굴착 기록: 프레임마다 그 순간의 위치 (RTK 수신기를 연결했으면 그 값) → gnss.csv
+            let sample = GnssSample(location: LocationService.shared.location)
+            gnssRows += 1
+            if sample.isRTK {
+                gnssRTKRows += 1
+            }
+            if sample.source == "accessory" {
+                gnssAccessorySeen = true
+            }
+            gnss = sample
+        }
+        encoder.add(frame: frame, quality: quality, gnss: gnss)
         considerThumbnail(frame: frame, directory: encoder.directory.absoluteURL.standardizedFileURL)
         considerColorKeyframe(frame: frame)
         considerPointSample(frame: frame)
@@ -1236,7 +1472,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     /// 마지막 사진 대비 12 cm 이동 또는 10° 회전이면 고해상도 정지 사진 요청 (흔들리면 건너뜀, 최대 200장)
     private func considerHighResolution(frame: ARFrame) {
-        guard areaMode, hiresAccepting, !hiresInFlight, hiresCount < HiresRecorder.maxShots else { return }
+        guard hiresMode, hiresAccepting, !hiresInFlight, hiresCount < HiresRecorder.maxShots else { return }
         guard case .normal = frame.camera.trackingState else { return }
         guard frame.timestamp - lastHiresRequestTime >= CaptureTuning.hiresMinInterval else { return }
         let transform = frame.camera.transform
@@ -1247,9 +1483,11 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if turned > 180 {
                 turned = 360 - turned
             }
-            // 균열 근접 모드는 간격을 절반으로 (겹침을 늘린다)
-            let minMove = crackMode ? CaptureTuning.crackHiresMove : CaptureTuning.hiresMove
-            let minTurn = crackMode ? CaptureTuning.crackHiresTurn : CaptureTuning.hiresTurn
+            // 균열 근접 모드는 간격을 절반으로 (겹침을 늘린다), 굴착 기록은 약 1 m·15° (근경·원경)
+            let minMove = crackMode ? CaptureTuning.crackHiresMove
+                : (trenchMode ? CaptureTuning.trenchHiresMove : CaptureTuning.hiresMove)
+            let minTurn = crackMode ? CaptureTuning.crackHiresTurn
+                : (trenchMode ? CaptureTuning.trenchHiresTurn : CaptureTuning.hiresTurn)
             guard moved >= minMove || turned >= minTurn else { return }
         }
         // 균열 근접 모드는 흔들림이 아주 작을 때만 (옮기고 잠깐 멈추면 찍힌다)
@@ -1495,6 +1733,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             ? UIColor.black.withAlphaComponent(0.55)
             : UIColor.systemOrange.withAlphaComponent(0.85)
         updateDistanceBadge(frame: frame, depth: guidance.centerDepth)
+        updateTrenchProgress(frame: frame, depth: guidance.centerDepth, capturing: capturing)
         updateThermalState()
         // 제자리 회전 (방 모드, 녹화 중)
         let rotatingInPlace = capturing && inPlaceCheck
@@ -1531,6 +1770,9 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             if capturing {
                 guide.countWarning("tilt")
             }
+        } else if trenchMode, capturing, let tilt = trenchTiltWarning(frame: frame, depth: guidance.centerDepth) {
+            text = tilt
+            guide.countWarning("tilt")
         } else if rotatingInPlace {
             text = "옆으로 걸으면서 찍어 주세요 — 제자리에서 돌기만 하면 3D 가 비어요"
             guide.countWarning("in_place")
@@ -1545,6 +1787,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
                 text = objectTracker.hint(recording: startedRecording != nil)
             } else if areaMode {
                 text = areaHint()
+            } else if trenchMode {
+                text = trenchHint()
             } else {
                 // 모드 힌트: 녹화 전, 그리고 녹화 시작 8초 동안
                 let showHint: Bool
@@ -1575,7 +1819,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     /// 녹화가 시작돼 월드 원점이 고정된 뒤에만 표시한다 (좌표 = odometry.csv 와 같은 월드)
     private var markingActive: Bool {
-        areaMode && startedRecording != nil && !awaitingTracking
+        (areaMode || trenchMode) && startedRecording != nil && !awaitingTracking
     }
 
     /// marks.json 의 frame: 마지막으로 저장된 프레임 번호
@@ -1596,11 +1840,19 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
 
     private func handleMarkTap(at point: CGPoint) {
         guard markingActive else {
-            showNotice("녹화를 시작한 뒤 균열을 탭하면 위치가 표시됩니다 (길게 누르면 선)")
+            showNotice(trenchMode ? "녹화를 시작한 뒤 관을 탭하면 종류가 표시됩니다 (아래 '관:' 에서 종류 고르기)"
+                       : "녹화를 시작한 뒤 균열을 탭하면 위치가 표시됩니다 (길게 누르면 선)")
             return
         }
         guard let frame = session.currentFrame, let hit = worldPoint(at: point, frame: frame) else {
             showNotice("그 자리의 위치를 찾지 못했습니다 — 조금 더 가까이에서 다시 탭하세요")
+            return
+        }
+        if trenchMode {
+            // 굴착 기록: 고른 관 종류로 표시 (서버는 이 표시를 색 추정보다 우선한다)
+            let mark = CrackMarks.utility(id: nextMarkID, at: hit.position, utilityClass: utilityClass,
+                                          t: frame.timestamp, frame: currentFrameNumber, source: hit.source)
+            addMark(mark, node: CrackMarks.makePinNode(at: hit.position, color: utilityClass.color))
             return
         }
         switch lineStage {
@@ -1626,8 +1878,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
         sceneView.scene.rootNode.addChildNode(node)
         markNodes.append(node)
         markHaptic.impactOccurred()
-        showNotice((mark.kind == "crack_line" ? "균열 선 표시" : "균열 표시") + " — 모두 \(crackMarks.count)개")
+        let what: String
+        switch mark.kind {
+        case "crack_line":
+            what = "균열 선 표시"
+        case "utility":
+            what = "관 표시 (" + (UtilityClass(rawValue: mark.utilityClass ?? "")?.label ?? "모름") + ")"
+        default:
+            what = "균열 표시"
+        }
+        showNotice(what + " — 모두 \(crackMarks.count)개")
         updateMarkButtons()
+        updateChecklist()
     }
 
     /// 선의 시작점 (흰 핀). 다음 탭이 끝점
@@ -1698,6 +1960,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             showNotice("마지막 표시를 지웠습니다 — 남은 표시 \(crackMarks.count)개")
         }
         updateMarkButtons()
+        updateChecklist()
     }
 
     private func updateMarkButtons() {
@@ -1710,6 +1973,10 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             markLineButton.setTitle("선: 끝점", for: .normal)
         }
         markUndoButton.setTitle(crackMarks.isEmpty ? "되돌리기" : "되돌리기 (\(crackMarks.count))", for: .normal)
+        if trenchMode {
+            utilityButton.setTitle("관: \(utilityClass.label) ▾", for: .normal)
+            utilityButton.menu = makeUtilityMenu()
+        }
     }
 
     /// 잠깐(CaptureTuning.noticeSeconds) 보여 주는 파란 안내
@@ -1739,6 +2006,8 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             let band: DistanceAdvice.Band
             if areaMode {
                 band = DistanceAdvice.area(stillFx: areaStillFx(frame: frame))
+            } else if trenchMode {
+                band = DistanceAdvice.trench
             } else if objectMode {
                 band = DistanceAdvice.object
                 if objectTracker.isSet {
@@ -1753,6 +2022,7 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
             advice = DistanceAdvice.evaluate(distance: distance, band: band)
         }
         distanceLabel.text = prefix + advice.text
+            + (trenchMode ? " · 기울기 \(Int(trenchTilt(frame: frame).rounded()))°" : "")
         distanceLabel.textColor = advice.tone == .yellow ? .black : .white
         switch advice.tone {
         case .green:
@@ -1837,8 +2107,18 @@ class RecordSessionViewController : UIViewController, ARSessionDelegate {
     private func updateGeoLabel() {
         if scanMeta?.locationSource == "map", let manual = scanMeta?.manualFix {
             geoLabel.text = String(format: "지도 위치 %.5f, %.5f", manual.lat, manual.lon)
+            geoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+            return
+        }
+        // RTK 배지: 수평 정확도 5 cm 이하 (외부 MFi 수신기를 연결하면 iOS 위치가 그 값으로 바뀐다)
+        if let location = LocationService.shared.location, location.horizontalAccuracy >= 0,
+           location.horizontalAccuracy <= CaptureTuning.rtkHorizontalAccuracy {
+            let external = location.sourceInformation?.isProducedByAccessory == true ? " · 외부 수신기" : ""
+            geoLabel.text = String(format: "RTK ±%.0f cm", location.horizontalAccuracy * 100) + external
+            geoLabel.backgroundColor = UIColor.systemGreen.withAlphaComponent(0.8)
         } else {
             geoLabel.text = LocationService.shared.shortStatus
+            geoLabel.backgroundColor = UIColor.black.withAlphaComponent(0.55)
         }
     }
 

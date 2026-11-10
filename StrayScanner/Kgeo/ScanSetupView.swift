@@ -48,18 +48,19 @@ struct ScanSetupView: View {
                 TextField("제목", text: $title)
                 TextField("비고 (선택)", text: $note, axis: .vertical)
                     .lineLimit(2...4)
-                Picker("모드", selection: $modeRaw) {
-                    ForEach(ScanMode.allCases) { mode in
-                        Text(mode.label).tag(mode.rawValue)
-                    }
+                Picker("모드", selection: topModeBinding) {
+                    Text(ScanMode.home.label).tag(ScanMode.home.rawValue)
+                    Text(ScanMode.survey.label).tag(ScanMode.survey.rawValue)
+                    Text("⛏ 굴착 기록").tag("trench")
                 }
                 .pickerStyle(.segmented)
-                Text(modeRaw == ScanMode.survey.rawValue
-                     ? "현장조사: 물체(360°), 면(정사영상 — 트렌치·벽 균열·바닥), 일반 영상 중에서 고릅니다. 반투명·광택 표면은 LiDAR 에 안 잡힙니다."
-                     : "홈스캔: 벽과 바닥을 0.3~3 m 거리에서 천천히 훑습니다. 방 단위로 나눠 찍는 것이 좋습니다.")
+                Text(modeDescription)
                     .font(.caption)
                     .foregroundColor(.secondary)
-                if modeRaw == ScanMode.survey.rawValue {
+                if isTrench {
+                    trenchRows
+                }
+                if modeRaw == ScanMode.survey.rawValue && !isTrench {
                     Picker("촬영 대상", selection: $surveyStyle) {
                         Text("물체 360°").tag("object")
                         Text("면 (정사영상)").tag("area")
@@ -286,6 +287,10 @@ struct ScanSetupView: View {
         if style == "area" {
             meta.capture = "area"
             meta.area = AreaInfo(surface: areaSurface, hires: 0, crackMode: areaCrackMode ? true : nil)
+        } else if style == "trench" {
+            // 굴착 기록: scan_type=survey + trench_mode=1, 고해상도 사진은 면 촬영과 같은 방식
+            meta.capture = "trench"
+            meta.trench = TrenchInfo()
         } else {
             let useObjectCapture = meta.objectMode == true && captureMethod == "objcap" && ObjcapSupport.isAvailable
             meta.capture = useObjectCapture ? "objcap" : "video"
@@ -308,6 +313,50 @@ struct ScanSetupView: View {
         }
         validationMessage = nil
         onStart(meta)
+    }
+
+    // MARK: - 굴착 기록
+
+    /// 맨 위 모드: 홈스캔 | 현장조사 | 굴착 기록. 굴착은 현장조사(scan_type=survey)의 촬영 대상 trench 로 저장한다
+    private var topModeBinding: Binding<String> {
+        Binding(
+            get: { isTrench ? "trench" : modeRaw },
+            set: { value in
+                if value == "trench" {
+                    modeRaw = ScanMode.survey.rawValue
+                    surveyStyle = "trench"
+                } else {
+                    if surveyStyle == "trench" {
+                        surveyStyle = "object"
+                    }
+                    modeRaw = value
+                }
+            }
+        )
+    }
+
+    private var isTrench: Bool {
+        modeRaw == ScanMode.survey.rawValue && surveyStyle == "trench"
+    }
+
+    private var modeDescription: String {
+        if isTrench {
+            return "굴착 기록: 되메우기 전에 드러난 배관·케이블을 찍으면 서버가 관의 위치·직경·깊이(지표~관 윗면)·종류를 뽑아 3D·서류·지도로 남깁니다. 트렌치 가장자리를 따라 양쪽을 왕복하며(2~5분) 0.5~3 m 거리로 찍고, 시작과 끝에는 주변 지면·연석·맨홀이 3~5 m 들어가게 찍습니다(원지반·지도 맞춤용)."
+        }
+        return modeRaw == ScanMode.survey.rawValue
+            ? "현장조사: 물체(360°), 면(정사영상 — 트렌치·벽 균열·바닥), 일반 영상 중에서 고릅니다. 반투명·광택 표면은 LiDAR 에 안 잡힙니다."
+            : "홈스캔: 벽과 바닥을 0.3~3 m 거리에서 천천히 훑습니다. 방 단위로 나눠 찍는 것이 좋습니다."
+    }
+
+    @ViewBuilder
+    private var trenchRows: some View {
+        Label("트렌치 안에 들어가지 마세요. 가장자리에서 찍고, 깊으면 셀카봉을 쓰세요.",
+              systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundColor(.orange)
+        Text("• 가장자리 모서리에 기준 표식(AprilTag 스티커) 3~4개를 붙이세요 — 서버가 가설기준점·축척으로 씁니다\n• 물이 고였으면 빼고 찍으세요\n• 폰은 트렌치 안쪽으로 30~45° 기울여 반대쪽 벽과 바닥이 보이게\n• 녹화 중 관을 탭하면 종류(가스·상수·하수·전력·통신·난방)를 표시합니다\n• 약 1 m 마다 4K 무음 사진이 자동으로 찍힙니다\n• RTK 수신기(Emlid Reach RX2·Bad Elf Flex 등 MFi)를 연결하면 위치가 cm 급으로 기록되고 화면에 RTK 가 뜹니다")
+            .font(.caption)
+            .foregroundColor(.secondary)
     }
 
     // MARK: - 관리 대상 (장소)

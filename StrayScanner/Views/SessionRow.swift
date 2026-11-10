@@ -74,7 +74,7 @@ struct SessionRow: View {
     private func subtitle(meta: ScanMeta?) -> String {
         var parts = [sessionDate(), String(format: "%d초", Int(round(session.duration)))]
         if let meta = meta {
-            parts.append(meta.mode.label)
+            parts.append(meta.capture == "trench" ? "⛏ 굴착 기록" : meta.mode.label)
             if let bytes = meta.folderBytes {
                 parts.append(SessionRow.formatBytes(bytes))
             }
@@ -84,7 +84,7 @@ struct SessionRow: View {
             if let images = meta.objcap?.images {
                 parts.append("사진 \(images)장")
             }
-            if let hires = meta.area?.hires {
+            if let hires = meta.area?.hires ?? meta.trench?.hires {
                 parts.append("고해상도 \(hires)장")
             }
         }

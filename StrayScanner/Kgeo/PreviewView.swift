@@ -432,6 +432,20 @@ struct PreviewView: View {
                 if let count = vm.points?.pointCount {
                     LabeledContent("색 점", value: "\(count)")
                 }
+                if let trench = meta.trench {
+                    LabeledContent("방식", value: "⛏ 굴착 기록")
+                    LabeledContent("고해상도 사진", value: "\(trench.hires ?? 0)장"
+                                   + ((trench.hiresSkipped ?? 0) > 0 ? " · 흔들려서 건너뜀 \(trench.hiresSkipped ?? 0)회" : ""))
+                    LabeledContent("가장자리 왕복", value: "\(trench.passes ?? 0)구간 (양쪽 = 2)")
+                    LabeledContent("체크", value: PreviewView.trenchChecklistText(trench))
+                    if let marks = trench.utilityMarks, marks > 0 {
+                        LabeledContent("관 종류 표시", value: "\(marks)개")
+                    }
+                    if let rows = trench.gnssRows, rows > 0 {
+                        LabeledContent("GNSS", value: String(format: "RTK(±5 cm 이하) %.0f%%", (trench.rtkRatio ?? 0) * 100)
+                                       + (trench.gnssAccessory == true ? " · 외부 수신기" : " · 폰 GPS"))
+                    }
+                }
                 if let area = meta.area {
                     LabeledContent("방식", value: "면 촬영 (정사영상) · \(PreviewView.surfaceLabel(area.surface))")
                     if area.crackMode == true {
@@ -511,6 +525,24 @@ struct PreviewView: View {
         }
     }
 
+    /// 굴착 기록 체크리스트 한 줄
+    static func trenchChecklistText(_ trench: TrenchInfo) -> String {
+        let items: [(String, Bool)] = [
+            ("표식", trench.markersPlaced == true),
+            ("시작 주변", trench.startContext == true),
+            ("왕복", (trench.passes ?? 0) >= 2),
+            ("끝 주변", trench.endContext == true),
+        ]
+        return items.map { ($0.1 ? "✓ " : "✗ ") + $0.0 }.joined(separator: " · ")
+    }
+
+    /// meta.json 을 다시 읽으면 snake_case 사전 키가 camelCase 로 바뀌어 온다 (JSONDecoder.convertFromSnakeCase)
+    private static func camelCase(_ key: String) -> String {
+        let parts = key.split(separator: "_")
+        guard let first = parts.first else { return key }
+        return String(first) + parts.dropFirst().map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined()
+    }
+
     /// 경고 샘플(10 Hz) 수를 '가까움 ≈3초' 형태로
     static func countsText(_ counts: [String: Int]) -> String {
         let labels: [(String, String)] = [
@@ -520,7 +552,7 @@ struct PreviewView: View {
         ]
         var parts: [String] = []
         for (key, label) in labels {
-            if let count = counts[key], count > 0 {
+            if let count = counts[key] ?? counts[PreviewView.camelCase(key)], count > 0 {
                 parts.append(String(format: "%@ ≈%.0f초", label, Double(count) / 10))
             }
         }

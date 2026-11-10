@@ -122,6 +122,30 @@ struct SiteRef: Codable, Hashable {
     var lastThumbUrl: String?
 }
 
+/// 굴착 기록 (meta.json 의 trench). 업로드 필드 trench_mode=1 (서버 utilities.json, utility_contract.md)
+struct TrenchInfo: Codable, Hashable {
+    /// 1 = 굴착 기록 모드
+    var mode: Int = 1
+    /// 근경·원경 고해상도 정지 사진 (hires/ + hires/poses.json, 면 촬영과 같은 방식) 수·출처·형식
+    var hires: Int?
+    var hiresSkipped: Int?
+    var hiresSource: String?
+    var hiresFormat: String?
+    var videoSize: String?
+    /// 앱이 센 트렌치 가장자리 구간 수 (양쪽 왕복 = 2)
+    var passes: Int?
+    /// 진행 체크리스트: 기준 표식(AprilTag) 붙임, 시작·끝 주변 지면 (3~5 m) 촬영
+    var markersPlaced: Bool?
+    var startContext: Bool?
+    var endContext: Bool?
+    /// 관 종류 표시 수 (marks.json kind=utility)
+    var utilityMarks: Int?
+    /// gnss.csv 행 수, 수평 정확도 5 cm 이하(RTK) 비율, 외부 수신기 값이 있었는지
+    var gnssRows: Int?
+    var rtkRatio: Float?
+    var gnssAccessory: Bool?
+}
+
 /// Object Capture 기록 (meta.json 의 objcap)
 struct ObjcapInfo: Codable, Hashable {
     /// PhotogrammetrySession 디테일. iOS 는 reduced 만 지원한다 (Apple 문서)
@@ -182,6 +206,8 @@ struct ScanMeta: Codable, Hashable {
     var area: AreaInfo?
     /// 관리 대상(장소). 없으면 nil
     var site: SiteRef?
+    /// 굴착 기록 (capture == "trench")
+    var trench: TrenchInfo?
 
     var isObjcap: Bool { capture == "objcap" }
 
@@ -196,6 +222,9 @@ struct ScanMeta: Codable, Hashable {
             copy.area = AreaInfo(surface: area.surface, hires: 0, crackMode: area.crackMode)
         }
         copy.site = site
+        if trench != nil {
+            copy.trench = TrenchInfo()
+        }
         return copy
     }
     var fix: GeoFix?
